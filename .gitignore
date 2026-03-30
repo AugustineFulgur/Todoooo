@@ -1,0 +1,5 @@
+/todo-launcher-debug.exe
+/todo-launcher-*.exe
+*.exe~
+*.tmp
+/vendor
