@@ -92,20 +92,22 @@ func (w *OverlayHeaderWidget) SetCountText(count int) {
 func (w *OverlayHeaderWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	bounds := w.ClientBoundsPixels()
 	paintOverlayBackground(canvas, bounds)
+	scale := overlayScale(bounds.Width, 420)
+	s := func(v int) int { return overlayMetric(v, scale) }
 
-	panelBounds := walk.Rectangle{X: 0, Y: 5, Width: bounds.Width - 1, Height: bounds.Height - 10}
-	fillRoundedRectOnCanvas(canvas, rgb(239, 244, 249), rgb(239, 244, 249), walk.Rectangle{X: 3, Y: 9, Width: panelBounds.Width - 6, Height: panelBounds.Height - 2}, 22)
-	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), panelBounds, 22)
-	fillRoundedRectOnCanvas(canvas, rgb(43, 103, 162), rgb(43, 103, 162), walk.Rectangle{X: 16, Y: 17, Width: 58, Height: 5}, 3)
-	fillRoundedRectOnCanvas(canvas, rgb(233, 241, 249), rgb(233, 241, 249), walk.Rectangle{X: 16, Y: 29, Width: 90, Height: 18}, 9)
+	panelBounds := walk.Rectangle{X: 0, Y: s(5), Width: bounds.Width - 1, Height: bounds.Height - s(10)}
+	fillRoundedRectOnCanvas(canvas, rgb(239, 244, 249), rgb(239, 244, 249), walk.Rectangle{X: s(3), Y: s(9), Width: panelBounds.Width - s(6), Height: panelBounds.Height - s(2)}, s(22))
+	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), panelBounds, s(22))
+	fillRoundedRectOnCanvas(canvas, rgb(43, 103, 162), rgb(43, 103, 162), walk.Rectangle{X: s(16), Y: s(17), Width: s(58), Height: s(5)}, s(3))
+	fillRoundedRectOnCanvas(canvas, rgb(233, 241, 249), rgb(233, 241, 249), walk.Rectangle{X: s(16), Y: s(29), Width: s(90), Height: s(18)}, s(9))
 
 	countWidth := clampInt(28+len([]rune(w.countText))*14, 96, 162)
-	countBounds := walk.Rectangle{X: bounds.Width - countWidth - 14, Y: 17, Width: countWidth, Height: 30}
-	fillRoundedRectOnCanvas(canvas, rgb(232, 240, 248), rgb(206, 219, 233), countBounds, 15)
+	countBounds := walk.Rectangle{X: bounds.Width - countWidth - s(14), Y: s(17), Width: countWidth, Height: s(30)}
+	fillRoundedRectOnCanvas(canvas, rgb(232, 240, 248), rgb(206, 219, 233), countBounds, s(15))
 	_ = canvas.DrawTextPixels(w.countText, w.countFont, rgb(29, 61, 96), countBounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 
-	_ = canvas.DrawTextPixels(w.title, w.titleFont, rgb(21, 28, 34), walk.Rectangle{X: 16, Y: 20, Width: bounds.Width - countWidth - 48, Height: 28}, walk.TextSingleLine|walk.TextNoPrefix)
-	_ = canvas.DrawTextPixels(w.subtitle, w.subtitleFont, rgb(92, 101, 111), walk.Rectangle{X: 16, Y: 51, Width: bounds.Width - 28, Height: 18}, walk.TextSingleLine|walk.TextEndEllipsis|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels(w.title, w.titleFont, rgb(21, 28, 34), walk.Rectangle{X: s(16), Y: s(20), Width: bounds.Width - countWidth - s(48), Height: s(28)}, walk.TextSingleLine|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels(w.subtitle, w.subtitleFont, rgb(92, 101, 111), walk.Rectangle{X: s(16), Y: s(51), Width: bounds.Width - s(28), Height: s(18)}, walk.TextSingleLine|walk.TextEndEllipsis|walk.TextNoPrefix)
 	return nil
 }
 
@@ -257,11 +259,13 @@ func (w *OverlayActionWidget) CreateLayoutItem(ctx *walk.LayoutContext) walk.Lay
 func (w *OverlayActionWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	bounds := w.ClientBoundsPixels()
 	paintOverlayBackground(canvas, bounds)
+	scale := overlayScale(bounds.Width, 420)
+	s := func(v int) int { return overlayMetric(v, scale) }
 
 	frameBounds := walk.Rectangle{X: 0, Y: 0, Width: bounds.Width - 1, Height: bounds.Height - 1}
-	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), frameBounds, 16)
+	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), frameBounds, s(16))
 
-	buttonBounds := insetRect(frameBounds, 8, 6)
+	buttonBounds := insetRect(frameBounds, s(8), s(6))
 	fill := rgb(43, 103, 162)
 	border := rgb(43, 103, 162)
 	if w.pressed {
@@ -269,7 +273,7 @@ func (w *OverlayActionWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error
 		border = rgb(35, 90, 147)
 	}
 
-	fillRoundedRectOnCanvas(canvas, fill, border, buttonBounds, 12)
+	fillRoundedRectOnCanvas(canvas, fill, border, buttonBounds, s(12))
 	_ = canvas.DrawTextPixels(w.label, w.textFont, rgb(255, 255, 255), buttonBounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 	return nil
 }
@@ -555,12 +559,14 @@ func (w *OverlayCollapseWidget) CreateLayoutItem(ctx *walk.LayoutContext) walk.L
 func (w *OverlayCollapseWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	bounds := w.ClientBoundsPixels()
 	paintOverlayBackground(canvas, bounds)
+	scale := overlayScale(bounds.Width, 42)
+	s := func(v int) int { return overlayMetric(v, scale) }
 
-	cardBounds := walk.Rectangle{X: 0, Y: 6, Width: bounds.Width - 1, Height: bounds.Height - 12}
-	fillRoundedRectOnCanvas(canvas, rgb(239, 244, 249), rgb(239, 244, 249), walk.Rectangle{X: 3, Y: 10, Width: cardBounds.Width - 6, Height: cardBounds.Height - 2}, 20)
+	cardBounds := walk.Rectangle{X: 0, Y: s(6), Width: bounds.Width - 1, Height: bounds.Height - s(12)}
+	fillRoundedRectOnCanvas(canvas, rgb(239, 244, 249), rgb(239, 244, 249), walk.Rectangle{X: s(3), Y: s(10), Width: cardBounds.Width - s(6), Height: cardBounds.Height - s(2)}, s(20))
 	fill := rgb(252, 254, 255)
 	border := rgb(223, 228, 236)
-	iconBounds := insetRect(cardBounds, 8, 12)
+	iconBounds := insetRect(cardBounds, s(8), s(12))
 	iconFill := rgb(236, 242, 249)
 	iconBorder := rgb(220, 229, 239)
 	if w.pressed {
@@ -570,8 +576,8 @@ func (w *OverlayCollapseWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) err
 		iconBorder = rgb(205, 220, 234)
 	}
 
-	fillRoundedRectOnCanvas(canvas, fill, border, cardBounds, 18)
-	fillRoundedRectOnCanvas(canvas, iconFill, iconBorder, iconBounds, 12)
+	fillRoundedRectOnCanvas(canvas, fill, border, cardBounds, s(18))
+	fillRoundedRectOnCanvas(canvas, iconFill, iconBorder, iconBounds, s(12))
 	_ = canvas.DrawTextPixels("\u25b6", w.iconFont, rgb(64, 87, 114), iconBounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 	return nil
 }
@@ -697,32 +703,34 @@ func (w *OverlaySortWidget) SetSelected(mode SortMode) {
 func (w *OverlaySortWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	bounds := w.ClientBoundsPixels()
 	paintOverlayBackground(canvas, bounds)
+	scale := overlayScale(bounds.Width, 420)
+	s := func(v int) int { return overlayMetric(v, scale) }
 
-	headerBounds := walk.Rectangle{X: 0, Y: 0, Width: bounds.Width - 1, Height: w.rowHeight - 2}
+	headerBounds := walk.Rectangle{X: 0, Y: 0, Width: bounds.Width - 1, Height: w.rowHeight - s(2)}
 	fill := rgb(252, 254, 255)
 	border := rgb(223, 228, 236)
 	if w.pressedHeader {
 		fill = rgb(244, 249, 253)
 		border = rgb(209, 220, 232)
 	}
-	fillRoundedRectOnCanvas(canvas, fill, border, headerBounds, 14)
+	fillRoundedRectOnCanvas(canvas, fill, border, headerBounds, s(14))
 
-	_ = canvas.DrawTextPixels("\u6392\u5e8f\u65b9\u5f0f", w.labelFont, rgb(90, 100, 111), walk.Rectangle{X: 14, Y: 0, Width: 94, Height: w.rowHeight - 2}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels("\u6392\u5e8f\u65b9\u5f0f", w.labelFont, rgb(90, 100, 111), walk.Rectangle{X: s(14), Y: 0, Width: s(94), Height: w.rowHeight - s(2)}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
 
-	selectedWidth := clampInt(bounds.Width-154, 128, 176)
-	selectedBounds := walk.Rectangle{X: bounds.Width - selectedWidth - 36, Y: 6, Width: selectedWidth, Height: 26}
-	fillRoundedRectOnCanvas(canvas, rgb(234, 241, 248), rgb(210, 221, 233), selectedBounds, 13)
-	_ = canvas.DrawTextPixels(sortModeLabel(w.selected), w.valueFont, rgb(33, 62, 94), walk.Rectangle{X: selectedBounds.X + 12, Y: selectedBounds.Y, Width: selectedBounds.Width - 26, Height: selectedBounds.Height}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
-	_ = canvas.DrawTextPixels(sortChevron(w.expanded), w.valueFont, rgb(86, 99, 111), walk.Rectangle{X: bounds.Width - 34, Y: 0, Width: 20, Height: w.rowHeight - 2}, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
+	selectedWidth := clampInt(bounds.Width-s(154), s(128), s(176))
+	selectedBounds := walk.Rectangle{X: bounds.Width - selectedWidth - s(36), Y: s(6), Width: selectedWidth, Height: s(26)}
+	fillRoundedRectOnCanvas(canvas, rgb(234, 241, 248), rgb(210, 221, 233), selectedBounds, s(13))
+	_ = canvas.DrawTextPixels(sortModeLabel(w.selected), w.valueFont, rgb(33, 62, 94), walk.Rectangle{X: selectedBounds.X + s(12), Y: selectedBounds.Y, Width: selectedBounds.Width - s(26), Height: selectedBounds.Height}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels(sortChevron(w.expanded), w.valueFont, rgb(86, 99, 111), walk.Rectangle{X: bounds.Width - s(34), Y: 0, Width: s(20), Height: w.rowHeight - s(2)}, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 
 	if !w.expanded {
 		return nil
 	}
 
-	panelBounds := walk.Rectangle{X: 0, Y: 44, Width: bounds.Width - 1, Height: bounds.Height - 45}
-	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), panelBounds, 16)
+	panelBounds := walk.Rectangle{X: 0, Y: s(44), Width: bounds.Width - 1, Height: bounds.Height - s(45)}
+	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), panelBounds, s(16))
 
-	_ = canvas.DrawTextPixels("\u5feb\u6377\u6392\u5e8f", w.labelFont, rgb(104, 112, 120), walk.Rectangle{X: 14, Y: 48, Width: 90, Height: 18}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels("\u5feb\u6377\u6392\u5e8f", w.labelFont, rgb(104, 112, 120), walk.Rectangle{X: s(14), Y: s(48), Width: s(90), Height: s(18)}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
 
 	for _, mode := range []SortMode{SortModePriority, SortModeDeadline} {
 		optionBounds := w.optionBounds(mode)
@@ -887,9 +895,11 @@ func (w *DockTabWidget) SetCountText(count int) {
 func (w *DockTabWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	bounds := w.ClientBoundsPixels()
 	paintOverlayBackground(canvas, bounds)
+	scale := overlayScale(bounds.Width, 54)
+	s := func(v int) int { return overlayMetric(v, scale) }
 
-	cardBounds := walk.Rectangle{X: 3, Y: 3, Width: bounds.Width - 6, Height: bounds.Height - 6}
-	shadowBounds := walk.Rectangle{X: 5, Y: 5, Width: cardBounds.Width, Height: cardBounds.Height}
+	cardBounds := walk.Rectangle{X: s(3), Y: s(3), Width: bounds.Width - s(6), Height: bounds.Height - s(6)}
+	shadowBounds := walk.Rectangle{X: s(5), Y: s(5), Width: cardBounds.Width, Height: cardBounds.Height}
 	fill := rgb(252, 254, 255)
 	border := rgb(214, 223, 234)
 	textColor := rgb(29, 61, 96)
@@ -898,8 +908,8 @@ func (w *DockTabWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 		border = rgb(199, 213, 228)
 	}
 
-	fillRoundedRectOnCanvas(canvas, rgb(236, 242, 248), rgb(236, 242, 248), shadowBounds, 24)
-	fillRoundedRectOnCanvas(canvas, fill, border, cardBounds, 24)
+	fillRoundedRectOnCanvas(canvas, rgb(236, 242, 248), rgb(236, 242, 248), shadowBounds, s(24))
+	fillRoundedRectOnCanvas(canvas, fill, border, cardBounds, s(24))
 	_ = canvas.DrawTextPixels(w.countText, w.countFont, textColor, cardBounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 	return nil
 }
@@ -990,4 +1000,26 @@ func fillRoundedRectOnCanvas(canvas *walk.Canvas, fill, stroke walk.Color, bound
 
 	_ = canvas.FillRoundedRectanglePixels(brush, bounds, walk.Size{Width: radius, Height: radius})
 	_ = canvas.DrawRoundedRectanglePixels(pen, bounds, walk.Size{Width: radius, Height: radius})
+}
+
+func overlayScale(width int, base int) float64 {
+	if base <= 0 {
+		return 1
+	}
+	scale := float64(width) / float64(base)
+	if scale < 0.85 {
+		return 0.85
+	}
+	if scale > 1.25 {
+		return 1.25
+	}
+	return scale
+}
+
+func overlayMetric(value int, scale float64) int {
+	scaled := int(float64(value)*scale + 0.5)
+	if scaled < 1 {
+		return 1
+	}
+	return scaled
 }

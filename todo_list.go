@@ -158,8 +158,12 @@ func (p *CardPainter) layoutTodo(todo Todo, width, y int, actionLabel string) ca
 	if width < minBoardWidth {
 		width = minBoardWidth
 	}
+	scale := cardScaleFactor(width)
+	s := func(value int) int {
+		return scaleMetric(value, scale)
+	}
 
-	availableWidth := width - boardPaddingX*2
+	availableWidth := width - s(boardPaddingX)*2
 	cardWidth := int(math.Round(float64(width) * 0.90))
 	if cardWidth > availableWidth {
 		cardWidth = availableWidth
@@ -169,10 +173,10 @@ func (p *CardPainter) layoutTodo(todo Todo, width, y int, actionLabel string) ca
 	}
 
 	cardX := (width - cardWidth) / 2
-	if cardX < boardPaddingX {
-		cardX = boardPaddingX
+	if cardX < s(boardPaddingX) {
+		cardX = s(boardPaddingX)
 	}
-	textWidth := cardWidth - cardHorizontalInset*2 - checkAreaWidth
+	textWidth := cardWidth - s(cardHorizontalInset)*2 - s(checkAreaWidth)
 	if textWidth < 220 {
 		textWidth = 220
 	}
@@ -186,19 +190,21 @@ func (p *CardPainter) layoutTodo(todo Todo, width, y int, actionLabel string) ca
 	countdownWidth := p.measurePillWidth(countdownText)
 	tagWidth := p.measurePillWidth(tagText)
 
-	contentX := cardX + cardHorizontalInset
-	contentY := y + cardTopInset + 10
+	contentX := cardX + s(cardHorizontalInset)
+	contentY := y + s(cardTopInset) + s(10)
 
-	metaHeight := pillHeight
-	countdownX := contentX + typeWidth + pillGap + deadlineWidth + pillGap
+	metaHeight := s(pillHeight)
+	gap := s(pillGap)
+	rowGap := s(metaRowGap)
+	countdownX := contentX + typeWidth + gap + deadlineWidth + gap
 	countdownY := contentY
-	tagX := countdownX + countdownWidth + pillGap
+	tagX := countdownX + countdownWidth + gap
 	tagY := contentY
-	if typeWidth+pillGap+deadlineWidth+pillGap+countdownWidth+pillGap+tagWidth > textWidth {
-		metaHeight = pillHeight*2 + metaRowGap
+	if typeWidth+gap+deadlineWidth+gap+countdownWidth+gap+tagWidth > textWidth {
+		metaHeight = s(pillHeight)*2 + rowGap
 		countdownX = contentX
-		countdownY = contentY + pillHeight + metaRowGap
-		tagX = countdownX + countdownWidth + pillGap
+		countdownY = contentY + s(pillHeight) + rowGap
+		tagX = countdownX + countdownWidth + gap
 		tagY = countdownY
 	}
 
@@ -210,39 +216,39 @@ func (p *CardPainter) layoutTodo(todo Todo, width, y int, actionLabel string) ca
 	bodyText := cardBodyText(todo)
 	detailsHeight := p.measureTextHeight(bodyText, p.bodyFont, textWidth, maxBodyHeight)
 
-	height := cardTopInset + 8 + metaHeight + metaToTitleGap + titleHeight + cardBottomInset
+	height := s(cardTopInset) + s(8) + metaHeight + s(metaToTitleGap) + titleHeight + s(cardBottomInset)
 	if detailsHeight > 0 {
-		height += titleToBodyGap + detailsHeight
+		height += s(titleToBodyGap) + detailsHeight
 	}
-	if height < cardMinHeight {
-		height = cardMinHeight
+	if height < s(cardMinHeight) {
+		height = s(cardMinHeight)
 	}
 
 	cardBounds := walk.Rectangle{X: cardX, Y: y, Width: cardWidth, Height: height}
-	accentBounds := walk.Rectangle{X: cardBounds.X + 16, Y: cardBounds.Y + 12, Width: cardBounds.Width - 32, Height: 5}
-	contentX = cardBounds.X + cardHorizontalInset
-	contentY = cardBounds.Y + cardTopInset + 10
+	accentBounds := walk.Rectangle{X: cardBounds.X + s(16), Y: cardBounds.Y + s(12), Width: cardBounds.Width - s(32), Height: s(5)}
+	contentX = cardBounds.X + s(cardHorizontalInset)
+	contentY = cardBounds.Y + s(cardTopInset) + s(10)
 
-	typeBounds := walk.Rectangle{X: contentX, Y: contentY, Width: typeWidth, Height: pillHeight}
-	deadlineBounds := walk.Rectangle{X: typeBounds.X + typeBounds.Width + pillGap, Y: contentY, Width: deadlineWidth, Height: pillHeight}
-	countdownBounds := walk.Rectangle{X: countdownX, Y: countdownY, Width: countdownWidth, Height: pillHeight}
-	tagBounds := walk.Rectangle{X: tagX, Y: tagY, Width: tagWidth, Height: pillHeight}
-	titleY := contentY + metaHeight + metaToTitleGap
+	typeBounds := walk.Rectangle{X: contentX, Y: contentY, Width: typeWidth, Height: s(pillHeight)}
+	deadlineBounds := walk.Rectangle{X: typeBounds.X + typeBounds.Width + gap, Y: contentY, Width: deadlineWidth, Height: s(pillHeight)}
+	countdownBounds := walk.Rectangle{X: countdownX, Y: countdownY, Width: countdownWidth, Height: s(pillHeight)}
+	tagBounds := walk.Rectangle{X: tagX, Y: tagY, Width: tagWidth, Height: s(pillHeight)}
+	titleY := contentY + metaHeight + s(metaToTitleGap)
 	titleBounds := walk.Rectangle{X: contentX, Y: titleY, Width: textWidth, Height: titleHeight}
-	detailsBounds := walk.Rectangle{X: contentX, Y: titleY + titleHeight + titleToBodyGap, Width: textWidth, Height: detailsHeight}
-	actionColumnWidth := maxInt(checkSize, postponeButtonWidth)
-	actionColumnX := cardBounds.X + cardBounds.Width - cardHorizontalInset - actionColumnWidth
+	detailsBounds := walk.Rectangle{X: contentX, Y: titleY + titleHeight + s(titleToBodyGap), Width: textWidth, Height: detailsHeight}
+	actionColumnWidth := maxInt(s(checkSize), s(postponeButtonWidth))
+	actionColumnX := cardBounds.X + cardBounds.Width - s(cardHorizontalInset) - actionColumnWidth
 	checkBounds := walk.Rectangle{
-		X:      actionColumnX + (actionColumnWidth-checkSize)/2,
-		Y:      cardBounds.Y + (cardBounds.Height-checkSize)/2,
-		Width:  checkSize,
-		Height: checkSize,
+		X:      actionColumnX + (actionColumnWidth-s(checkSize))/2,
+		Y:      cardBounds.Y + (cardBounds.Height-s(checkSize))/2,
+		Width:  s(checkSize),
+		Height: s(checkSize),
 	}
 	postponeBounds := walk.Rectangle{
-		X:      actionColumnX + (actionColumnWidth-postponeButtonWidth)/2,
-		Y:      cardBounds.Y + cardBounds.Height - cardBottomInset - postponeButtonHeight + 2,
-		Width:  postponeButtonWidth,
-		Height: postponeButtonHeight,
+		X:      actionColumnX + (actionColumnWidth-s(postponeButtonWidth))/2,
+		Y:      cardBounds.Y + cardBounds.Height - s(cardBottomInset) - s(postponeButtonHeight) + s(2),
+		Width:  s(postponeButtonWidth),
+		Height: s(postponeButtonHeight),
 	}
 
 	return cardLayout{
@@ -297,8 +303,9 @@ func (p *CardPainter) drawCard(canvas *walk.Canvas, layout cardLayout, offset in
 	}
 	_ = fade
 
-	p.fillRoundedRect(canvas, cardFill, cardBorder, cardBounds, cardRadius)
-	p.fillRoundedRect(canvas, accentColor, accentColor, accentBounds, 3)
+	scale := cardScaleFactor(layout.cardBounds.Width)
+	p.fillRoundedRect(canvas, cardFill, cardBorder, cardBounds, scaleMetric(cardRadius, scale))
+	p.fillRoundedRect(canvas, accentColor, accentColor, accentBounds, scaleMetric(3, scale))
 
 	p.drawPill(canvas, typeBounds, accentColor, typeFg, string(layout.todo.Kind))
 	p.drawPill(canvas, deadlineBounds, deadlineFill, deadlineTextColor, "\u622a\u6b62 "+formatTodoDeadline(layout.todo.Deadline))
@@ -341,12 +348,12 @@ func (p *CardPainter) drawCard(canvas *walk.Canvas, layout cardLayout, offset in
 }
 
 func (p *CardPainter) drawPill(canvas *walk.Canvas, bounds walk.Rectangle, bg, fg walk.Color, text string) {
-	p.fillRoundedRect(canvas, bg, bg, bounds, 12)
+	p.fillRoundedRect(canvas, bg, bg, bounds, maxInt(8, bounds.Height/2))
 	_ = canvas.DrawTextPixels(text, p.metaFont, fg, bounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 }
 
 func (p *CardPainter) drawActionPill(canvas *walk.Canvas, bounds walk.Rectangle, bg, border, fg walk.Color, text string) {
-	p.fillRoundedRect(canvas, bg, border, bounds, 13)
+	p.fillRoundedRect(canvas, bg, border, bounds, maxInt(8, bounds.Height/2))
 	_ = canvas.DrawTextPixels(text, p.metaFont, fg, bounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 }
 
@@ -423,6 +430,8 @@ type TodoBoardWidget struct {
 	actionLabel   string
 	showCheck     bool
 	showAction    bool
+	skinBitmap    *walk.Bitmap
+	skinOpacity   byte
 }
 
 func NewTodoBoardWidget(parent walk.Container, painter *CardPainter, onComplete func(string), onPostpone func(string), onOpenDetails func(string), actionLabel string, showCheck bool, showAction bool) (*TodoBoardWidget, error) {
@@ -580,6 +589,21 @@ func (b *TodoBoardWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 		defer background.Dispose()
 		_ = canvas.FillRectanglePixels(background, b.ClientBoundsPixels())
 	}
+	if b.skinBitmap != nil && b.skinOpacity > 0 {
+		size := b.skinBitmap.Size()
+		bounds := b.ClientBoundsPixels()
+		if size.Width > 0 && size.Height > 0 && bounds.Width > 0 && bounds.Height > 0 {
+			scale := float64(bounds.Height) / float64(size.Height)
+			drawWidth := int(math.Round(float64(size.Width) * scale))
+			drawBounds := walk.Rectangle{
+				X:      (bounds.Width - drawWidth) / 2,
+				Y:      0,
+				Width:  drawWidth,
+				Height: bounds.Height,
+			}
+			_ = canvas.DrawBitmapWithOpacityPixels(b.skinBitmap, drawBounds, b.skinOpacity)
+		}
+	}
 
 	width := b.ClientBoundsPixels().Width
 	if width <= 0 {
@@ -597,6 +621,18 @@ func (b *TodoBoardWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	}
 
 	return nil
+}
+
+func (b *TodoBoardWidget) SetSkin(bitmap *walk.Bitmap, opacityPercent int) {
+	b.skinBitmap = bitmap
+	if opacityPercent < 0 {
+		opacityPercent = 0
+	}
+	if opacityPercent > 100 {
+		opacityPercent = 100
+	}
+	b.skinOpacity = byte(math.Round(float64(opacityPercent) * 255 / 100))
+	_ = b.Invalidate()
 }
 
 func (b *TodoBoardWidget) drawEmptyState(canvas *walk.Canvas) error {
@@ -796,6 +832,25 @@ func boardBackgroundColor() walk.Color {
 	return rgb(246, 248, 252)
 }
 
+func cardScaleFactor(width int) float64 {
+	scale := float64(width) / 620.0
+	if scale < 0.85 {
+		return 0.85
+	}
+	if scale > 1.25 {
+		return 1.25
+	}
+	return scale
+}
+
+func scaleMetric(value int, scale float64) int {
+	scaled := int(math.Round(float64(value) * scale))
+	if scaled < 1 {
+		return 1
+	}
+	return scaled
+}
+
 func blendColor(left, right walk.Color, ratio float64) walk.Color {
 	if ratio <= 0 {
 		return left
@@ -823,7 +878,7 @@ func pointInRect(x, y int, rect walk.Rectangle) bool {
 }
 
 func cardBodyText(todo Todo) string {
-	if progress := strings.TrimSpace(todo.Progress); progress != "" {
+	if progress := latestProgressEntry(todo.Progress); progress != "" {
 		return "\u8fdb\u5c55\uff1a" + progress
 	}
 	return strings.TrimSpace(todo.Details)
@@ -848,6 +903,21 @@ func firstTag(tags []string) string {
 	for _, tag := range tags {
 		if strings.TrimSpace(tag) != "" {
 			return strings.TrimSpace(tag)
+		}
+	}
+	return ""
+}
+
+func latestProgressEntry(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+	if value == "" {
+		return ""
+	}
+	lines := strings.Split(value, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line != "" {
+			return line
 		}
 	}
 	return ""

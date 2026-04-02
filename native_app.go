@@ -23,19 +23,35 @@ var (
 	layeredUser32                  = windows.NewLazySystemDLL("user32.dll")
 	procSetLayeredWindowAttributes = layeredUser32.NewProc("SetLayeredWindowAttributes")
 	procSetWindowRgn               = layeredUser32.NewProc("SetWindowRgn")
+	procSetWindowsHookExW          = layeredUser32.NewProc("SetWindowsHookExW")
+	procUnhookWindowsHookEx        = layeredUser32.NewProc("UnhookWindowsHookEx")
+	procCallNextHookEx             = layeredUser32.NewProc("CallNextHookEx")
 	gdi32DLL                       = windows.NewLazySystemDLL("gdi32.dll")
 	procCreateRoundRectRgn         = gdi32DLL.NewProc("CreateRoundRectRgn")
 	mainWndProcPtr                 = syscall.NewCallback(mainWndProc)
+	mouseHookProcPtr               = syscall.NewCallback(globalMouseHookProc)
 	mainWndProcMu                  sync.Mutex
 	mainWndProcMap                 = map[win.HWND]*NativeApp{}
+	mouseHookMu                    sync.Mutex
+	mouseHookApp                   *NativeApp
 )
 
 const (
 	layeredAlphaFlag   = 0x00000002
 	overlayOpacity     = 250
 	removalHideRatio   = 0.80
-	expandedWidthRatio = 0.25
+	expandedWindowWidth = 480
+	whMouseLL          = 14
+	hcAction           = 0
 )
+
+type msllhookstruct struct {
+	Pt          win.POINT
+	MouseData   uint32
+	Flags       uint32
+	Time        uint32
+	DwExtraInfo uintptr
+}
 
 type NativeApp struct {
 	store               *Store
@@ -53,6 +69,7 @@ type NativeApp struct {
 	listWidget          *TodoBoardWidget
 	rootLayout          *walk.BoxLayout
 	painter             *CardPainter
+	backgroundBitmap    *walk.Bitmap
 	notifyIcon          *walk.NotifyIcon
 	appIcon             *walk.Icon
 	trayExpandAction    *walk.Action
@@ -81,8 +98,13 @@ type NativeApp struct {
 	settings            AppSettings
 	dialogDepth         int
 	windowAnimating     bool
-	dockCollapseArmedAt time.Time
 	mainWndProcOrig     uintptr
+	lastExpandedBounds  walk.Rectangle
+	internalPointerActive bool
+	mouseHook           uintptr
+	processID           uint32
+	trackedWindowsMu    sync.RWMutex
+	trackedWindows      map[win.HWND]struct{}
 }
 
 func NewNativeApp(store *Store) (*NativeApp, error) {
@@ -93,7 +115,7 @@ func NewNativeApp(store *Store) (*NativeApp, error) {
 		windowWidth:     targetExpandedWindowWidth(work.Width),
 		collapsedWidth:  60,
 		collapsedHeight: 60,
-		minWindowHeight: 360,
+		minWindowHeight: 0,
 		maxWindowHeight: 900,
 		maxHeightRatio:  0.80,
 		deadlinePoll:    15 * time.Second,
@@ -101,6 +123,7 @@ func NewNativeApp(store *Store) (*NativeApp, error) {
 		reminded:        map[string]bool{},
 		sortMode:        SortModePriority,
 		settings:        settings,
+		trackedWindows:  map[win.HWND]struct{}{},
 	}, nil
 }
 
@@ -125,10 +148,16 @@ func (a *NativeApp) Run() error {
 	}
 	a.listWidget = listWidget
 	a.listWidget.SetWidthHint(a.boardWidthHint())
+	a.listWidget.SetSkin(a.backgroundBitmap, a.settings.BackgroundAlpha)
 
 	a.applyTodos(a.store.List())
 	a.startDeadlineWatcher()
+	a.primeWindowState()
+	a.setWindowCollapsed(true, false)
 	a.showWindow()
+	if err := a.installGlobalMouseHook(); err != nil {
+		return err
+	}
 	a.mw.Run()
 
 	return nil
@@ -151,7 +180,7 @@ func (a *NativeApp) SummonFromHotkey() {
 func (a *NativeApp) buildUI() error {
 	if err := (MainWindow{
 		AssignTo: &a.mw,
-		Title:    "\u5f85\u529e\u96f7\u8fbe",
+		Title:    "todoooo",
 		MinSize:  Size{Width: a.collapsedWidth, Height: a.collapsedHeight},
 		MaxSize:  Size{Width: a.windowWidth, Height: a.maxWindowHeight},
 		OnKeyDown: func(key walk.Key) {
@@ -208,6 +237,7 @@ func (a *NativeApp) buildUI() error {
 	}
 
 	a.installMainWndProc()
+	a.registerTrackedWindow(a.mw.Handle())
 	_ = a.mw.SetDoubleBuffering(true)
 	if layout, ok := a.mw.Layout().(*walk.BoxLayout); ok {
 		a.rootLayout = layout
@@ -222,18 +252,11 @@ func (a *NativeApp) buildUI() error {
 		a.collapseWindow()
 	})
 	a.mw.Deactivating().Attach(func() {
-		if a.shouldCollapseOnDeactivate() {
-			a.collapseWindow()
-		}
+		// Collapse is driven only by global mouse-down outside app windows.
 	})
 	a.mw.MouseUp().Attach(func(x, y int, button walk.MouseButton) {
 		if button == walk.LeftButton && a.collapsed {
 			a.showWindow()
-		}
-	})
-	a.mw.BoundsChanged().Attach(func() {
-		if a.shouldCollapseWhenDockedRight() {
-			a.collapseWindow()
 		}
 	})
 
@@ -251,9 +274,12 @@ func (a *NativeApp) buildUI() error {
 
 	headerWidget, err := NewOverlayHeaderWidget(
 		headerRow,
-		"\u5f85\u529e\u96f7\u8fbe",
+		"todoooo",
 		"Ctrl + \u5c0f\u952e\u76d8 9 \u5c55\u5f00 / \u6536\u8d77\uff1b\u53f3\u952e\u5f85\u529e\u53ef\u67e5\u770b\u8be6\u60c5\u5e76\u66f4\u65b0\u8fdb\u5c55\u3002",
-		func() { startWindowDrag(a.mw.Handle()) },
+		func() {
+			a.beginInternalPointerAction()
+			startWindowDrag(a.mw.Handle())
+		},
 	)
 	if err != nil {
 		return err
@@ -330,7 +356,7 @@ func (a *NativeApp) applyTodos(todos []Todo) {
 		a.sortWidget.SetSelected(a.sortMode)
 	}
 	if a.notifyIcon != nil {
-		_ = a.notifyIcon.SetToolTip(fmt.Sprintf("\u5f85\u529e\u96f7\u8fbe - %d \u9879\u5f85\u529e", len(todos)))
+		_ = a.notifyIcon.SetToolTip(fmt.Sprintf("todoooo - %d \u9879\u5f85\u529e", len(todos)))
 	}
 
 	if a.listWidget != nil {
@@ -619,6 +645,7 @@ func (a *NativeApp) openAddDialog() {
 	}
 
 	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
 	if _, err := NewOverlayDialogHeaderWidget(headerHost, "新增事项", "填写完成后保存到主面板列表。", func() {
 		startWindowDrag(dlg.Handle())
 	}); err != nil {
@@ -651,6 +678,7 @@ func (a *NativeApp) openAddDialog() {
 	if dlg.Run() == walk.DlgCmdOK {
 		a.showWindow()
 	}
+	a.ensureCollapsedVisible()
 }
 
 func (a *NativeApp) openPostponeDialog(id string) {
@@ -817,6 +845,7 @@ func (a *NativeApp) openPostponeDialog(id string) {
 	}
 
 	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
 	if _, err := NewOverlayDialogHeaderWidget(headerHost, "推迟待办", "只修改 deadline，不影响事项内容和进展。", func() {
 		startWindowDrag(dlg.Handle())
 	}); err != nil {
@@ -842,6 +871,7 @@ func (a *NativeApp) openPostponeDialog(id string) {
 	_ = deadlineHourBox.SetCurrentIndex(defaultDeadline.Hour())
 	_ = deadlineMinuteBox.SetCurrentIndex(defaultDeadline.Minute())
 	dlg.Run()
+	a.ensureCollapsedVisible()
 }
 
 func (a *NativeApp) openDetailDialog(id string) {
@@ -861,12 +891,13 @@ func (a *NativeApp) openDetailDialog(id string) {
 	var headerHost *walk.Composite
 	var closeHost *walk.Composite
 	var detailsEdit *walk.TextEdit
-	var progressEdit *walk.TextEdit
+	var progressListEdit *walk.TextEdit
+	var progressInputEdit *walk.TextEdit
+	var progressAddHost *walk.Composite
 	var tagsEdit *walk.LineEdit
 	var statusLabel *walk.Label
 
 	dirty := false
-	lastSavedProgress := normalizeProgressValue(todo.Progress)
 	lastSavedDetails := normalizeProgressValue(todo.Details)
 	lastSavedTagsKey := tagsKey(todo.Tags)
 	const autoSaveDelay = 700 * time.Millisecond
@@ -896,30 +927,28 @@ func (a *NativeApp) openDetailDialog(id string) {
 	saveProgress := func(force bool) error {
 		saveMu.Lock()
 		defer saveMu.Unlock()
-		if progressEdit == nil || progressEdit.IsDisposed() || detailsEdit == nil || detailsEdit.IsDisposed() || tagsEdit == nil || tagsEdit.IsDisposed() {
+		if detailsEdit == nil || detailsEdit.IsDisposed() || tagsEdit == nil || tagsEdit.IsDisposed() {
 			return nil
 		}
 
-		progress := normalizeProgressValue(progressEdit.Text())
 		details := normalizeProgressValue(detailsEdit.Text())
 		tags := normalizeTags(tagsEdit.Text())
 		tagKey := tagsKey(tags)
 
-		if !force && !dirty && progress == lastSavedProgress && details == lastSavedDetails && tagKey == lastSavedTagsKey {
+		if !force && !dirty && details == lastSavedDetails && tagKey == lastSavedTagsKey {
 			return nil
 		}
-		if progress == lastSavedProgress && details == lastSavedDetails && tagKey == lastSavedTagsKey {
+		if details == lastSavedDetails && tagKey == lastSavedTagsKey {
 			dirty = false
 			setStatus("内容与已保存版本一致", rgb(98, 107, 116))
 			return nil
 		}
 
-		todos, err := a.store.UpdateDetailsAndTags(id, details, progress, tags)
+		todos, err := a.store.UpdateDetailsAndTags(id, details, todo.Progress, tags)
 		if err != nil {
 			return err
 		}
 
-		lastSavedProgress = progress
 		lastSavedDetails = details
 		lastSavedTagsKey = tagKey
 		dirty = false
@@ -947,6 +976,31 @@ func (a *NativeApp) openDetailDialog(id string) {
 				}
 			})
 		})
+	}
+
+	appendProgress := func() {
+		if progressInputEdit == nil || progressInputEdit.IsDisposed() {
+			return
+		}
+		content := strings.TrimSpace(progressInputEdit.Text())
+		if content == "" {
+			setStatus("请输入进展内容", rgb(184, 56, 43))
+			return
+		}
+		todos, err := a.store.AppendProgress(id, content)
+		if err != nil {
+			setStatus("添加进展失败，请重试", rgb(184, 56, 43))
+			return
+		}
+		progressInputEdit.SetText("")
+		if updated, ok := a.store.Get(id); ok {
+			todo = updated
+		}
+		if progressListEdit != nil && !progressListEdit.IsDisposed() {
+			progressListEdit.SetText(progressTimeline(todo.Progress))
+		}
+		a.applyTodos(todos)
+		setStatus("已新增一条进展", rgb(45, 117, 88))
 	}
 
 	if err := (Dialog{
@@ -1054,16 +1108,35 @@ func (a *NativeApp) openDetailDialog(id string) {
 						TextColor: rgb(98, 107, 116),
 					},
 					TextEdit{
-						AssignTo:      &progressEdit,
-						Text:          todo.Progress,
+						AssignTo:      &progressListEdit,
+						Text:          progressTimeline(todo.Progress),
 						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
-						StretchFactor: 1,
+						ReadOnly:      true,
+						CompactHeight: true,
 						VScroll:       true,
-						MinSize:       Size{Height: 220},
+						MinSize:       Size{Height: 170},
+					},
+					Label{
+						Text:      "新增进展",
+						TextColor: rgb(98, 107, 116),
+					},
+					TextEdit{
+						AssignTo:      &progressInputEdit,
+						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
+						VScroll:       true,
+						MinSize:       Size{Height: 72},
+					},
+					Composite{
+						AssignTo:   &progressAddHost,
+						Background: SolidColorBrush{Color: rgb(252, 254, 255)},
+						Layout: VBox{
+							MarginsZero: true,
+							SpacingZero: true,
+						},
 					},
 					Label{
 						AssignTo:  &statusLabel,
-						Text:      "编辑会自动保存，离开详情页时也会强制保存",
+						Text:      "详情和标签会自动保存；新增进展后会按日期追加一行",
 						TextColor: rgb(98, 107, 116),
 					},
 				},
@@ -1093,6 +1166,7 @@ func (a *NativeApp) openDetailDialog(id string) {
 	}
 
 	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
 	if _, err := NewOverlayDialogHeaderWidget(headerHost, "待办详情", "查看内容并记录实时进展。", func() {
 		startWindowDrag(dlg.Handle())
 	}); err != nil {
@@ -1113,21 +1187,17 @@ func (a *NativeApp) openDetailDialog(id string) {
 		a.showError("创建详情窗口按钮失败", err)
 		return
 	}
+	if _, err := NewOverlayDialogActionWidget(progressAddHost, "新增进展", false, func() {
+		appendProgress()
+	}); err != nil {
+		dlg.Dispose()
+		a.showError("创建详情窗口按钮失败", err)
+		return
+	}
 
-	progressEdit.TextChanged().Attach(func() {
-		current := normalizeProgressValue(progressEdit.Text())
-		dirty = current != lastSavedProgress || normalizeProgressValue(detailsEdit.Text()) != lastSavedDetails || tagsKey(normalizeTags(tagsEdit.Text())) != lastSavedTagsKey
-		if dirty {
-			setStatus("编辑中，稍后自动保存", rgb(98, 107, 116))
-			scheduleSave()
-			return
-		}
-		stopScheduledSave()
-		setStatus("内容与已保存版本一致", rgb(98, 107, 116))
-	})
 	detailsEdit.TextChanged().Attach(func() {
 		currentDetails := normalizeProgressValue(detailsEdit.Text())
-		dirty = currentDetails != lastSavedDetails || normalizeProgressValue(progressEdit.Text()) != lastSavedProgress || tagsKey(normalizeTags(tagsEdit.Text())) != lastSavedTagsKey
+		dirty = currentDetails != lastSavedDetails || tagsKey(normalizeTags(tagsEdit.Text())) != lastSavedTagsKey
 		if dirty {
 			setStatus("编辑中，稍后自动保存", rgb(98, 107, 116))
 			scheduleSave()
@@ -1137,7 +1207,7 @@ func (a *NativeApp) openDetailDialog(id string) {
 		setStatus("内容与已保存版本一致", rgb(98, 107, 116))
 	})
 	tagsEdit.TextChanged().Attach(func() {
-		dirty = tagsKey(normalizeTags(tagsEdit.Text())) != lastSavedTagsKey || normalizeProgressValue(progressEdit.Text()) != lastSavedProgress || normalizeProgressValue(detailsEdit.Text()) != lastSavedDetails
+		dirty = tagsKey(normalizeTags(tagsEdit.Text())) != lastSavedTagsKey || normalizeProgressValue(detailsEdit.Text()) != lastSavedDetails
 		if dirty {
 			setStatus("编辑中，稍后自动保存", rgb(98, 107, 116))
 			scheduleSave()
@@ -1161,9 +1231,9 @@ func (a *NativeApp) openDetailDialog(id string) {
 		}
 	})
 
-	progressEdit.SetFocus()
-	progressEdit.SetTextSelection(progressEdit.TextLength(), progressEdit.TextLength())
+	progressInputEdit.SetFocus()
 	dlg.Run()
+	a.ensureCollapsedVisible()
 }
 
 func (a *NativeApp) openTagSearchDialog() {
@@ -1276,6 +1346,7 @@ func (a *NativeApp) openTagSearchDialog() {
 	}
 
 	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
 	if _, err := NewOverlayDialogHeaderWidget(headerHost, "标签搜索", "筛选主面板的待办事项。", func() {
 		startWindowDrag(dlg.Handle())
 	}); err != nil {
@@ -1307,6 +1378,7 @@ func (a *NativeApp) openTagSearchDialog() {
 
 	tagEdit.SetFocus()
 	dlg.Run()
+	a.ensureCollapsedVisible()
 }
 
 func (a *NativeApp) openHistoryDialog() {
@@ -1395,6 +1467,7 @@ func (a *NativeApp) openHistoryDialog() {
 	}
 
 	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
 	_ = dlg.SetBoundsPixels(walk.Rectangle{
 		X:      work.X + (work.Width-panelWidth)/2,
 		Y:      work.Y + (work.Height-640)/2,
@@ -1468,6 +1541,7 @@ func (a *NativeApp) openHistoryDialog() {
 	updateWidth()
 
 	dlg.Run()
+	a.ensureCollapsedVisible()
 }
 
 func (a *NativeApp) openHistoryDetailDialog(id string) bool {
@@ -1597,7 +1671,7 @@ func (a *NativeApp) openHistoryDetailDialog(id string) bool {
 						TextColor: rgb(98, 107, 116),
 					},
 					TextEdit{
-						Text:          detailText(todo.Progress),
+						Text:          progressTimeline(todo.Progress),
 						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
 						ReadOnly:      true,
 						CompactHeight: true,
@@ -1639,6 +1713,7 @@ func (a *NativeApp) openHistoryDetailDialog(id string) bool {
 	}
 
 	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
 	if _, err := NewOverlayDialogHeaderWidget(headerHost, "\u5386\u53f2\u4e8b\u9879", "\u67e5\u770b\u5185\u5bb9\u5e76\u53ef\u5220\u9664\u3002", func() {
 		startWindowDrag(dlg.Handle())
 	}); err != nil {
@@ -1662,6 +1737,7 @@ func (a *NativeApp) openHistoryDetailDialog(id string) bool {
 	}
 
 	dlg.Run()
+	a.ensureCollapsedVisible()
 	return deleted
 }
 
@@ -1681,6 +1757,8 @@ func (a *NativeApp) openSettingsDialog() {
 	var tintDaysEdit *walk.NumberEdit
 	var reminderBox *walk.ComboBox
 	var autoStartCheck *walk.CheckBox
+	var backgroundPathEdit *walk.LineEdit
+	var backgroundAlphaEdit *walk.NumberEdit
 	var errLabel *walk.Label
 
 	reminderLabels, reminderValues := reminderLeadOptions()
@@ -1698,6 +1776,12 @@ func (a *NativeApp) openSettingsDialog() {
 			next.AutoStart = autoStartCheck.Checked()
 			next.AutoStartAsked = true
 		}
+		if backgroundPathEdit != nil {
+			next.BackgroundPath = strings.TrimSpace(backgroundPathEdit.Text())
+		}
+		if backgroundAlphaEdit != nil {
+			next.BackgroundAlpha = int(math.Round(backgroundAlphaEdit.Value()))
+		}
 		saved, err := a.store.UpdateSettings(next)
 		if err != nil {
 			errLabel.SetText(err.Error())
@@ -1714,8 +1798,8 @@ func (a *NativeApp) openSettingsDialog() {
 		AssignTo:  &dlg,
 		Title:     "\u8bbe\u7f6e",
 		FixedSize: true,
-		MinSize:   Size{Width: 540, Height: 520},
-		MaxSize:   Size{Width: 540, Height: 520},
+		MinSize:   Size{Width: 560, Height: 470},
+		MaxSize:   Size{Width: 560, Height: 470},
 		Background: SolidColorBrush{
 			Color: boardBackgroundColor(),
 		},
@@ -1746,13 +1830,9 @@ func (a *NativeApp) openSettingsDialog() {
 				},
 				Children: []Widget{
 					Label{
-						Text:      "\u89c6\u89c9\u63d0\u9192",
+						Text:      "\u4e34\u671f\u4e0e\u80cc\u666f",
 						Font:      Font{Family: "Microsoft YaHei UI", PointSize: 11, Bold: true},
 						TextColor: rgb(36, 44, 53),
-					},
-					Label{
-						Text:      "\u53ef\u4ee5\u8c03\u6574\u5f85\u529e\u4ece\u8ddd\u79bb deadline \u591a\u5c11\u5929\u5f00\u59cb\u5411\u8c61\u9650\u989c\u8272\u8fc7\u6e21\u3002",
-						TextColor: rgb(95, 103, 112),
 					},
 					Composite{
 						Background: SolidColorBrush{Color: rgb(252, 254, 255)},
@@ -1795,34 +1875,49 @@ func (a *NativeApp) openSettingsDialog() {
 					},
 					CheckBox{
 						AssignTo:   &autoStartCheck,
-						Text:       "\u5f00\u673a\u542f\u52a8\uff08\u4f1a\u8be2\u95ee\uff09",
+						Text:       "\u5f00\u673a\u542f\u52a8",
 						Checked:    settings.AutoStart,
 						Background: SolidColorBrush{Color: rgb(252, 254, 255)},
 					},
 					Label{
-						Text:      "\u4f8b\u5982\u8bbe\u4e3a 15 \uff0c\u5c31\u4f1a\u4ece deadline \u524d 15 \u5929\u5f00\u59cb\u9010\u6b65\u7740\u8272\u3002",
-						TextColor: rgb(122, 129, 137),
+						Text:      "\u4e3b\u754c\u9762\u80cc\u666f PNG \u8def\u5f84",
+						TextColor: rgb(76, 88, 100),
 					},
-				},
-			},
-			Composite{
-				Background: SolidColorBrush{Color: rgb(252, 254, 255)},
-				MinSize:    Size{Height: 170},
-				Layout: VBox{
-					Margins: Margins{Left: 16, Top: 16, Right: 16, Bottom: 16},
-					Spacing: 8,
-				},
-				Children: []Widget{
-					Label{
-						Text:      "\u66f4\u591a\u8bbe\u7f6e",
-						Font:      Font{Family: "Microsoft YaHei UI", PointSize: 11, Bold: true},
-						TextColor: rgb(36, 44, 53),
+					LineEdit{
+						AssignTo:   &backgroundPathEdit,
+						Text:       settings.BackgroundPath,
+						Background: SolidColorBrush{Color: rgb(247, 250, 253)},
 					},
-					Label{
-						Text:      "\u8fd9\u91cc\u9884\u7559\u7ed9\u540e\u7eed\u7684\u6392\u5e8f\u3001\u901a\u77e5\u3001\u754c\u9762\u7b49\u8bbe\u7f6e\u9879\uff0c\u540e\u9762\u53ef\u4ee5\u76f4\u63a5\u5f80\u91cc\u7ee7\u7eed\u52a0\u3002",
-						TextColor: rgb(112, 121, 130),
+					Composite{
+						Background: SolidColorBrush{Color: rgb(252, 254, 255)},
+						Layout: HBox{
+							MarginsZero: true,
+							Spacing:     10,
+						},
+						Children: []Widget{
+							Label{
+								Text:      "\u80cc\u666f\u900f\u660e\u5ea6",
+								TextColor: rgb(76, 88, 100),
+								MinSize:   Size{Width: 92},
+							},
+							NumberEdit{
+								AssignTo:           &backgroundAlphaEdit,
+								Background:         SolidColorBrush{Color: rgb(247, 250, 253)},
+								Decimals:           0,
+								Increment:          1,
+								MinValue:           0,
+								MaxValue:           100,
+								SpinButtonsVisible: true,
+								MinSize:            Size{Width: 120},
+								MaxSize:            Size{Width: 120},
+							},
+							Label{
+								Text:      "%",
+								TextColor: rgb(112, 121, 130),
+							},
+							HSpacer{},
+						},
 					},
-					VSpacer{},
 				},
 			},
 			Label{
@@ -1862,6 +1957,7 @@ func (a *NativeApp) openSettingsDialog() {
 	}
 
 	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
 	if _, err := NewOverlayDialogHeaderWidget(headerHost, "\u8bbe\u7f6e", "\u5148\u8c03\u6574\u4e34\u671f\u53d8\u8272\u65f6\u95f4\uff0c\u540e\u9762\u7684\u6269\u5c55\u9879\u4e5f\u9884\u7559\u597d\u4e86\u3002", func() {
 		startWindowDrag(dlg.Handle())
 	}); err != nil {
@@ -1885,10 +1981,14 @@ func (a *NativeApp) openSettingsDialog() {
 	}
 
 	_ = tintDaysEdit.SetValue(float64(settings.UrgencyTintDays))
+	if backgroundAlphaEdit != nil {
+		_ = backgroundAlphaEdit.SetValue(float64(settings.BackgroundAlpha))
+	}
 	if reminderBox != nil {
 		_ = reminderBox.SetCurrentIndex(reminderLeadIndex(settings.ReminderLeadMin))
 	}
 	dlg.Run()
+	a.ensureCollapsedVisible()
 }
 
 func (a *NativeApp) showWindow() {
@@ -1920,10 +2020,54 @@ func (a *NativeApp) applySettings(settings AppSettings) {
 	if a.painter != nil {
 		a.painter.SetUrgencyTintDays(a.settings.UrgencyTintDays)
 	}
+	a.reloadBackgroundSkin()
 	a.reminderLead = time.Duration(a.settings.ReminderLeadMin) * time.Minute
 	if a.listWidget != nil {
+		a.listWidget.SetSkin(a.backgroundBitmap, a.settings.BackgroundAlpha)
 		_ = a.listWidget.Invalidate()
 	}
+}
+
+func (a *NativeApp) reloadBackgroundSkin() {
+	if a.backgroundBitmap != nil {
+		a.backgroundBitmap.Dispose()
+		a.backgroundBitmap = nil
+	}
+	path := strings.Trim(strings.TrimSpace(os.ExpandEnv(a.settings.BackgroundPath)), "\"")
+	if path == "" || a.mw == nil || a.mw.IsDisposed() {
+		return
+	}
+	if !filepath.IsAbs(path) {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	bitmap, err := walk.NewBitmapFromFileForDPI(path, a.mw.DPI())
+	if err != nil {
+		return
+	}
+	a.backgroundBitmap = bitmap
+}
+
+func (a *NativeApp) ensureCollapsedVisible() {
+	if a.mw == nil || a.mw.IsDisposed() || !a.collapsed {
+		return
+	}
+	win.ShowWindow(a.mw.Handle(), win.SW_SHOWNOACTIVATE)
+	bounds := a.mw.BoundsPixels()
+	_ = a.mw.SetBoundsPixels(bounds)
+	win.SetWindowPos(
+		a.mw.Handle(),
+		win.HWND_TOPMOST,
+		int32(bounds.X),
+		int32(bounds.Y),
+		int32(bounds.Width),
+		int32(bounds.Height),
+		win.SWP_NOACTIVATE,
+	)
 }
 
 func (a *NativeApp) updateSearchLabel() {
@@ -1962,13 +2106,42 @@ func (a *NativeApp) endDialog() {
 }
 
 func (a *NativeApp) shouldCollapseOnDeactivate() bool {
+	return false
+}
+
+func (a *NativeApp) beginInternalPointerAction() {
+	a.internalPointerActive = true
+}
+
+func (a *NativeApp) endInternalPointerAction() {
+	a.internalPointerActive = false
+}
+
+func (a *NativeApp) isPointerInteractingInsidePanel() bool {
 	if a.mw == nil || a.mw.IsDisposed() {
 		return false
 	}
-	if a.quitting || a.collapsed || !a.visible {
+
+	var pt win.POINT
+	if !win.GetCursorPos(&pt) {
 		return false
 	}
-	return a.dialogDepth == 0
+
+	hwnd := win.WindowFromPoint(pt)
+	if hwnd == 0 {
+		return false
+	}
+
+	main := a.mw.Handle()
+	if hwnd == main || win.IsChild(main, hwnd) {
+		return true
+	}
+
+	bounds := a.mw.BoundsPixels()
+	return pt.X >= int32(bounds.X) &&
+		pt.X <= int32(bounds.X+bounds.Width) &&
+		pt.Y >= int32(bounds.Y) &&
+		pt.Y <= int32(bounds.Y+bounds.Height)
 }
 
 func (a *NativeApp) installMainWndProc() {
@@ -2002,22 +2175,187 @@ func (a *NativeApp) uninstallMainWndProc() {
 	mainWndProcMu.Unlock()
 }
 
-func (a *NativeApp) shouldCollapseWhenDockedRight() bool {
-	if a.mw == nil || a.mw.IsDisposed() {
-		return false
+func (a *NativeApp) registerTrackedWindow(hwnd win.HWND) {
+	if a == nil || hwnd == 0 {
+		return
 	}
-	if a.quitting || a.collapsed || !a.visible || a.dialogDepth > 0 || a.syncingWindowSize || a.windowAnimating {
-		return false
+	a.trackedWindowsMu.Lock()
+	if a.trackedWindows == nil {
+		a.trackedWindows = map[win.HWND]struct{}{}
 	}
-	if !a.dockCollapseArmedAt.IsZero() && time.Now().Before(a.dockCollapseArmedAt) {
-		return false
+	a.trackedWindows[hwnd] = struct{}{}
+	a.trackedWindowsMu.Unlock()
+}
+
+func (a *NativeApp) unregisterTrackedWindow(hwnd win.HWND) {
+	if a == nil || hwnd == 0 {
+		return
+	}
+	a.trackedWindowsMu.Lock()
+	delete(a.trackedWindows, hwnd)
+	a.trackedWindowsMu.Unlock()
+}
+
+func (a *NativeApp) trackDialogWindow(dlg *walk.Dialog) {
+	if a == nil || dlg == nil || dlg.IsDisposed() {
+		return
+	}
+	hwnd := dlg.Handle()
+	if hwnd == 0 {
+		return
+	}
+	a.registerTrackedWindow(hwnd)
+	dlg.Disposing().Attach(func() {
+		a.unregisterTrackedWindow(hwnd)
+	})
+}
+
+func (a *NativeApp) pointInsideAnyAppWindow(pt win.POINT) bool {
+	a.trackedWindowsMu.RLock()
+	defer a.trackedWindowsMu.RUnlock()
+
+	for hwnd := range a.trackedWindows {
+		if hwnd == 0 || !win.IsWindowVisible(hwnd) {
+			continue
+		}
+		var rect win.RECT
+		if !win.GetWindowRect(hwnd, &rect) {
+			continue
+		}
+		if pt.X >= rect.Left && pt.X < rect.Right && pt.Y >= rect.Top && pt.Y < rect.Bottom {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *NativeApp) installGlobalMouseHook() error {
+	if a.mouseHook != 0 {
+		return nil
 	}
 
-	bounds := a.mw.BoundsPixels()
+	a.processID = uint32(os.Getpid())
+	module := win.GetModuleHandle(nil)
+	hook, _, err := procSetWindowsHookExW.Call(
+		uintptr(whMouseLL),
+		mouseHookProcPtr,
+		uintptr(module),
+		0,
+	)
+	if hook == 0 {
+		return err
+	}
+
+	mouseHookMu.Lock()
+	mouseHookApp = a
+	mouseHookMu.Unlock()
+	a.mouseHook = hook
+	return nil
+}
+
+func (a *NativeApp) uninstallGlobalMouseHook() {
+	if a.mouseHook == 0 {
+		mouseHookMu.Lock()
+		if mouseHookApp == a {
+			mouseHookApp = nil
+		}
+		mouseHookMu.Unlock()
+		return
+	}
+
+	procUnhookWindowsHookEx.Call(a.mouseHook)
+	a.mouseHook = 0
+
+	mouseHookMu.Lock()
+	if mouseHookApp == a {
+		mouseHookApp = nil
+	}
+	mouseHookMu.Unlock()
+}
+
+func (a *NativeApp) handleGlobalMouseDown(pt win.POINT) {
+	if a == nil || a.mw == nil || a.mw.IsDisposed() {
+		return
+	}
+	if a.quitting || a.collapsed || !a.visible || a.dialogDepth > 0 || a.windowAnimating {
+		return
+	}
+
+	if a.pointInsideAnyAppWindow(pt) {
+		return
+	}
+
+	a.mw.Synchronize(func() {
+		if a.mw == nil || a.mw.IsDisposed() || a.quitting || a.collapsed || !a.visible || a.dialogDepth > 0 || a.windowAnimating {
+			return
+		}
+		a.collapseWindow()
+	})
+}
+
+func (a *NativeApp) primeWindowState() {
+	if a.mw == nil || a.mw.IsDisposed() {
+		return
+	}
+
 	work := desktopWorkArea()
-	rightGap := work.X + work.Width - (bounds.X + bounds.Width)
-	const dockCollapseThreshold = 28
-	return rightGap < dockCollapseThreshold
+	a.windowWidth = targetExpandedWindowWidth(work.Width)
+	contentHeight := a.expandedChromeHeight() + a.listHeight()
+	minClientHeight := a.minimumExpandedClientHeight()
+	maxClientHeight := int(float64(work.Height)*a.maxHeightRatio) - a.windowDecorationHeight()
+	maxClientHeight = clampInt(maxClientHeight, minClientHeight, a.maxWindowHeight)
+	clientHeight := clampInt(contentHeight, minClientHeight, maxClientHeight)
+
+	a.lastExpandedBounds = walk.Rectangle{
+		X:      work.X + work.Width - a.windowWidth - 24,
+		Y:      clampInt(work.Y+42, work.Y+18, work.Y+work.Height-clientHeight-a.windowDecorationHeight()-18),
+		Width:  a.windowWidth,
+		Height: clientHeight + a.windowDecorationHeight(),
+	}
+}
+
+func (a *NativeApp) rememberExpandedBounds() {
+	if a.mw == nil || a.mw.IsDisposed() || a.collapsed {
+		return
+	}
+	bounds := a.mw.BoundsPixels()
+	if bounds.Width <= a.collapsedWidth || bounds.Height <= a.collapsedHeight {
+		return
+	}
+	a.lastExpandedBounds = bounds
+}
+
+func (a *NativeApp) resolvedExpandedBounds(targetClient walk.Size, work walk.Rectangle) walk.Rectangle {
+	decorationHeight := a.windowDecorationHeight()
+	width := targetClient.Width
+	height := targetClient.Height + decorationHeight
+
+	bounds := a.lastExpandedBounds
+	if bounds.Width <= 0 || bounds.Height <= 0 {
+		bounds = walk.Rectangle{
+			X:      work.X + work.Width - width - 24,
+			Y:      work.Y + 42,
+			Width:  width,
+			Height: height,
+		}
+	}
+
+	bounds.Width = width
+	bounds.Height = height
+	bounds.X = clampInt(bounds.X, work.X+18, work.X+work.Width-bounds.Width-18)
+	bounds.Y = clampInt(bounds.Y, work.Y+18, work.Y+work.Height-bounds.Height-18)
+	return bounds
+}
+
+func (a *NativeApp) rememberedExpandedClientHeight() int {
+	if a.lastExpandedBounds.Height <= 0 {
+		return 0
+	}
+	clientHeight := a.lastExpandedBounds.Height - a.windowDecorationHeight()
+	if clientHeight < 0 {
+		return 0
+	}
+	return clientHeight
 }
 
 func (a *NativeApp) hideWindow() {
@@ -2025,6 +2363,7 @@ func (a *NativeApp) hideWindow() {
 }
 
 func (a *NativeApp) collapseWindow() {
+	a.rememberExpandedBounds()
 	if a.animateCollapseToDock() {
 		return
 	}
@@ -2040,6 +2379,7 @@ func (a *NativeApp) animateCollapseToDock() bool {
 	if start.Width <= 0 || start.Height <= 0 {
 		return false
 	}
+	a.rememberExpandedBounds()
 
 	work := desktopWorkArea()
 	target := walk.Rectangle{
@@ -2162,11 +2502,6 @@ func (a *NativeApp) setWindowCollapsed(collapsed, focus bool) {
 
 	a.collapsed = collapsed
 	a.visible = true
-	if collapsed {
-		a.dockCollapseArmedAt = time.Time{}
-	} else {
-		a.dockCollapseArmedAt = time.Now().Add(900 * time.Millisecond)
-	}
 
 	a.mw.SetSuspended(true)
 	a.applyRootLayoutState(collapsed)
@@ -2210,11 +2545,12 @@ func (a *NativeApp) syncWindowSize() {
 
 	work := desktopWorkArea()
 	a.windowWidth = targetExpandedWindowWidth(work.Width)
-	_ = a.mw.SetMinMaxSize(
-		walk.Size{Width: a.collapsedWidth, Height: a.collapsedHeight},
-		walk.Size{Width: a.windowWidth, Height: a.maxWindowHeight},
-	)
+	minExpandedHeight := a.minimumExpandedClientHeight()
 	if a.collapsed {
+		_ = a.mw.SetMinMaxSize(
+			walk.Size{Width: a.collapsedWidth, Height: a.collapsedHeight},
+			walk.Size{Width: a.collapsedWidth, Height: a.collapsedHeight},
+		)
 		targetClient := walk.Size{Width: a.collapsedWidth, Height: a.collapsedHeight}
 		if a.mw.ClientBoundsPixels().Size() != targetClient {
 			_ = a.mw.SetClientSizePixels(targetClient)
@@ -2228,15 +2564,23 @@ func (a *NativeApp) syncWindowSize() {
 		return
 	}
 
+	_ = a.mw.SetMinMaxSize(
+		walk.Size{Width: a.windowWidth, Height: minExpandedHeight},
+		walk.Size{Width: a.windowWidth, Height: a.maxWindowHeight},
+	)
+
 	if a.listWidget != nil {
 		a.listWidget.SetWidthHint(a.boardWidthHint())
 	}
 
 	contentHeight := a.expandedChromeHeight() + a.listHeight()
 	maxClientHeight := int(float64(work.Height)*a.maxHeightRatio) - a.windowDecorationHeight()
-	maxClientHeight = clampInt(maxClientHeight, a.minWindowHeight, a.maxWindowHeight)
+	maxClientHeight = clampInt(maxClientHeight, minExpandedHeight, a.maxWindowHeight)
 
-	clientHeight := clampInt(contentHeight, a.minWindowHeight, maxClientHeight)
+	clientHeight := clampInt(contentHeight, minExpandedHeight, maxClientHeight)
+	if rememberedHeight := a.rememberedExpandedClientHeight(); rememberedHeight > 0 {
+		clientHeight = clampInt(rememberedHeight, minExpandedHeight, maxClientHeight)
+	}
 	targetClient := walk.Size{Width: a.windowWidth, Height: clientHeight}
 	if a.mw.ClientBoundsPixels().Size() != targetClient {
 		_ = a.mw.SetClientSizePixels(targetClient)
@@ -2246,9 +2590,7 @@ func (a *NativeApp) syncWindowSize() {
 		a.listWidget.SetWidthHint(a.boardWidthHint())
 	}
 
-	outer := a.mw.BoundsPixels()
-	outer.X = work.X + work.Width - outer.Width - 24
-	outer.Y = clampInt(work.Y+42, work.Y+18, work.Y+work.Height-outer.Height-18)
+	outer := a.resolvedExpandedBounds(targetClient, work)
 	_ = a.mw.SetBoundsPixels(outer)
 	a.applyWindowShape(false)
 }
@@ -2266,6 +2608,15 @@ func (a *NativeApp) expandedChromeHeight() int {
 	)
 
 	return headerHeight + footerHeight + windowMargins + stackSpacing
+}
+
+func (a *NativeApp) minimumExpandedClientHeight() int {
+	const minimumListViewportHeight = 170
+	minHeight := a.expandedChromeHeight() + minimumListViewportHeight
+	if a.minWindowHeight > 0 && a.minWindowHeight > minHeight {
+		return a.minWindowHeight
+	}
+	return minHeight
 }
 
 func (a *NativeApp) listHeight() int {
@@ -2317,7 +2668,7 @@ func (a *NativeApp) setupNotifyIcon() error {
 	if a.appIcon != nil {
 		_ = a.notifyIcon.SetIcon(a.appIcon)
 	}
-	_ = a.notifyIcon.SetToolTip("\u5f85\u529e\u96f7\u8fbe")
+	_ = a.notifyIcon.SetToolTip("todoooo")
 	_ = a.notifyIcon.SetVisible(true)
 
 	a.notifyIcon.MouseUp().Attach(func(x, y int, button walk.MouseButton) {
@@ -2577,7 +2928,9 @@ func (a *NativeApp) exitApp() {
 	}
 
 	a.quitting = true
+	a.uninstallGlobalMouseHook()
 	a.uninstallMainWndProc()
+	a.unregisterTrackedWindow(a.mw.Handle())
 	if a.notificationStop != nil {
 		close(a.notificationStop)
 		a.notificationStop = nil
@@ -2585,6 +2938,10 @@ func (a *NativeApp) exitApp() {
 	if a.notifyIcon != nil {
 		_ = a.notifyIcon.Dispose()
 		a.notifyIcon = nil
+	}
+	if a.backgroundBitmap != nil {
+		a.backgroundBitmap.Dispose()
+		a.backgroundBitmap = nil
 	}
 	a.mw.Close()
 }
@@ -2619,10 +2976,7 @@ func desktopWorkArea() walk.Rectangle {
 }
 
 func targetExpandedWindowWidth(workWidth int) int {
-	if workWidth <= 0 {
-		workWidth = int(win.GetSystemMetrics(win.SM_CXSCREEN))
-	}
-	return clampInt(int(math.Round(float64(workWidth)*expandedWidthRatio)), 420, 960)
+	return expandedWindowWidth
 }
 
 func activateHandle(hwnd win.HWND) {
@@ -2658,14 +3012,14 @@ func applyMainWindowChrome(hwnd win.HWND, collapsed bool) {
 		style &^= win.WS_CAPTION | win.WS_THICKFRAME | win.WS_MINIMIZEBOX | win.WS_MAXIMIZEBOX | win.WS_SYSMENU
 		style |= win.WS_POPUP
 	} else {
-		style &^= win.WS_POPUP | win.WS_THICKFRAME | win.WS_MINIMIZEBOX | win.WS_MAXIMIZEBOX
-		style |= win.WS_CAPTION | win.WS_SYSMENU
+		style &^= win.WS_POPUP | win.WS_MINIMIZEBOX | win.WS_MAXIMIZEBOX
+		style |= win.WS_CAPTION | win.WS_SYSMENU | win.WS_THICKFRAME
 	}
 	win.SetWindowLong(hwnd, win.GWL_STYLE, int32(style))
 
 	exStyle := uint32(win.GetWindowLong(hwnd, win.GWL_EXSTYLE))
-	exStyle &^= win.WS_EX_TOOLWINDOW
-	exStyle |= win.WS_EX_APPWINDOW | win.WS_EX_LAYERED
+	exStyle &^= win.WS_EX_APPWINDOW
+	exStyle |= win.WS_EX_TOOLWINDOW | win.WS_EX_LAYERED
 	win.SetWindowLong(hwnd, win.GWL_EXSTYLE, int32(exStyle))
 
 	if procSetLayeredWindowAttributes.Find() == nil {
@@ -2819,34 +3173,41 @@ func mainWndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 
 	if app != nil {
 		switch msg {
-		case win.WM_ACTIVATE:
-			if uint16(wParam&0xffff) == win.WA_INACTIVE {
-				app.mw.Synchronize(func() {
-					if app.shouldCollapseOnDeactivate() {
-						app.collapseWindow()
-					}
-				})
-			}
-		case win.WM_KILLFOCUS:
-			app.mw.Synchronize(func() {
-				if app.shouldCollapseOnDeactivate() {
-					app.collapseWindow()
-				}
-			})
-		case win.WM_ACTIVATEAPP:
-			if wParam == 0 {
-				app.mw.Synchronize(func() {
-					if app.shouldCollapseOnDeactivate() {
-						app.collapseWindow()
-					}
-				})
-			}
+		case win.WM_LBUTTONDOWN, win.WM_RBUTTONDOWN, win.WM_MBUTTONDOWN, win.WM_NCLBUTTONDOWN:
+			app.beginInternalPointerAction()
+		case win.WM_LBUTTONUP, win.WM_RBUTTONUP, win.WM_MBUTTONUP, win.WM_NCLBUTTONUP, win.WM_CAPTURECHANGED:
+			app.endInternalPointerAction()
+		case win.WM_ENTERSIZEMOVE:
+			app.beginInternalPointerAction()
+		case win.WM_EXITSIZEMOVE:
+			app.endInternalPointerAction()
+			app.rememberExpandedBounds()
 		}
 		if app.mainWndProcOrig != 0 {
 			return win.CallWindowProc(app.mainWndProcOrig, hwnd, msg, wParam, lParam)
 		}
 	}
 	return win.DefWindowProc(hwnd, msg, wParam, lParam)
+}
+
+func globalMouseHookProc(code int32, wParam, lParam uintptr) uintptr {
+	if code == hcAction {
+		switch uint32(wParam) {
+		case win.WM_LBUTTONDOWN, win.WM_RBUTTONDOWN, win.WM_MBUTTONDOWN, win.WM_XBUTTONDOWN:
+			hook := (*msllhookstruct)(unsafe.Pointer(lParam))
+			if hook != nil {
+				mouseHookMu.Lock()
+				app := mouseHookApp
+				mouseHookMu.Unlock()
+				if app != nil {
+					app.handleGlobalMouseDown(hook.Pt)
+				}
+			}
+		}
+	}
+
+	result, _, _ := procCallNextHookEx.Call(0, uintptr(code), wParam, lParam)
+	return result
 }
 
 func filterTodosByTags(todos []Todo, tags []string) []Todo {
@@ -2942,6 +3303,31 @@ func detailText(value string) string {
 		return "\u6682\u65e0\u8be6\u60c5\u5185\u5bb9\u3002"
 	}
 	return value
+}
+
+func progressTimeline(value string) string {
+	value = strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
+	if value == "" {
+		return "\u6682\u65e0\u8fdb\u5c55\u8bb0\u5f55\u3002"
+	}
+
+	lines := strings.Split(value, "\n")
+	formatted := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 11 && line[4] == '-' && line[7] == '-' && line[10] == ' ' {
+			formatted = append(formatted, line[:10]+"    "+strings.TrimSpace(line[11:]))
+			continue
+		}
+		formatted = append(formatted, line)
+	}
+	if len(formatted) == 0 {
+		return "\u6682\u65e0\u8fdb\u5c55\u8bb0\u5f55\u3002"
+	}
+	return strings.Join(formatted, "\r\n")
 }
 
 func historyMenuLabel(todo Todo) string {

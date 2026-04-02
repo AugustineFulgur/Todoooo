@@ -55,6 +55,8 @@ type AppSettings struct {
 	ReminderLeadMin int  `json:"reminderLeadMin"`
 	AutoStart       bool `json:"autoStart"`
 	AutoStartAsked  bool `json:"autoStartAsked"`
+	BackgroundPath  string `json:"backgroundPath"`
+	BackgroundAlpha int    `json:"backgroundAlpha"`
 }
 
 type storedData struct {
@@ -318,6 +320,42 @@ func (s *Store) UpdateProgress(id, progress string) ([]Todo, error) {
 	return s.updateFields(id, nil, &progress, nil)
 }
 
+func (s *Store) AppendProgress(id, content string) ([]Todo, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return s.List(), nil
+	}
+
+	content = strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
+	if content == "" {
+		return s.List(), nil
+	}
+
+	entry := time.Now().Format("2006-01-02") + " " + content
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for i := range s.data.Todos {
+		if s.data.Todos[i].ID != id {
+			continue
+		}
+
+		current := strings.TrimSpace(s.data.Todos[i].Progress)
+		if current == "" {
+			s.data.Todos[i].Progress = entry
+		} else {
+			s.data.Todos[i].Progress = current + "\n" + entry
+		}
+		if err := s.saveLocked(); err != nil {
+			return nil, err
+		}
+		return cloneTodos(s.data.Todos), nil
+	}
+
+	return cloneTodos(s.data.Todos), nil
+}
+
 func (s *Store) UpdateDetailsAndTags(id, details, progress string, tags []string) ([]Todo, error) {
 	return s.updateFields(id, &details, &progress, &tags)
 }
@@ -418,6 +456,8 @@ func defaultAppSettings() AppSettings {
 		ReminderLeadMin: 0,
 		AutoStart:       false,
 		AutoStartAsked:  false,
+		BackgroundPath:  "",
+		BackgroundAlpha: 72,
 	}
 }
 
@@ -433,6 +473,13 @@ func normalizeAppSettings(settings AppSettings) AppSettings {
 	}
 	if settings.ReminderLeadMin > 1440 {
 		settings.ReminderLeadMin = 1440
+	}
+	settings.BackgroundPath = strings.TrimSpace(settings.BackgroundPath)
+	if settings.BackgroundAlpha < 0 {
+		settings.BackgroundAlpha = 0
+	}
+	if settings.BackgroundAlpha > 100 {
+		settings.BackgroundAlpha = 100
 	}
 	return settings
 }
