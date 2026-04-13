@@ -55,7 +55,7 @@ type CardPainter struct {
 	titleFont       *walk.Font
 	metaFont        *walk.Font
 	bodyFont        *walk.Font
-	urgencyTintDays int
+	urgencyTintPercent int
 	measureMu       sync.Mutex
 }
 
@@ -95,18 +95,18 @@ func NewCardPainter(owner walk.Window) (*CardPainter, error) {
 		titleFont:       titleFont,
 		metaFont:        metaFont,
 		bodyFont:        bodyFont,
-		urgencyTintDays: 15,
+		urgencyTintPercent: 35,
 	}, nil
 }
 
 func (p *CardPainter) SetUrgencyTintDays(days int) {
 	if days <= 0 {
-		days = 15
+		days = 35
 	}
-	if days > 365 {
-		days = 365
+	if days > 100 {
+		days = 100
 	}
-	p.urgencyTintDays = days
+	p.urgencyTintPercent = days
 }
 
 func (p *CardPainter) measurePillWidth(text string) int {
@@ -296,7 +296,7 @@ func (p *CardPainter) drawCard(canvas *walk.Canvas, layout cardLayout, offset in
 	postponeTextColor := rgb(66, 93, 122)
 	titleColor := rgb(21, 28, 35)
 	detailsColor := rgb(92, 101, 111)
-	urgencyTint := urgencyTintRatio(layout.todo.Deadline, p.urgencyTintDays)
+	urgencyTint := urgencyTintRatio(layout.todo.CreatedAt, layout.todo.Deadline, p.urgencyTintPercent)
 	countdownFill, countdownTextColor := countdownPillColors(urgencyTint)
 	if removing {
 		checkMarkColor = accentColor
@@ -791,41 +791,52 @@ func todoTypeColors(kind TodoType) (walk.Color, walk.Color) {
 }
 
 func countdownPillColors(urgencyTint float64) (walk.Color, walk.Color) {
-	baseFill := rgb(242, 246, 250)
-	baseText := rgb(101, 109, 118)
-	targetFill := rgb(252, 231, 228)
-	targetText := rgb(174, 58, 47)
+	baseFill := rgb(244, 247, 251)
+	baseText := rgb(98, 107, 116)
+	targetFill := rgb(207, 84, 68)
+	targetText := rgb(255, 255, 255)
 	return blendColor(baseFill, targetFill, urgencyTint), blendColor(baseText, targetText, urgencyTint)
 }
 
-func urgencyTintRatio(value string, startDays int) float64 {
-	if startDays <= 0 {
+func urgencyTintRatio(createdValue, deadlineValue string, startPercent int) float64 {
+	if startPercent <= 0 {
 		return 0
 	}
 
-	deadline := parseStoredTime(value, time.Time{})
+	deadline := parseStoredTime(deadlineValue, time.Time{})
 	if deadline.IsZero() {
 		return 0
 	}
-
-	diff := deadline.Sub(time.Now())
-	if diff <= 0 {
-		return 1
-	}
-
-	window := time.Duration(startDays) * 24 * time.Hour
-	if diff >= window {
+	createdAt := parseStoredTime(createdValue, time.Time{})
+	if createdAt.IsZero() {
 		return 0
 	}
 
-	ratio := 1 - diff.Seconds()/window.Seconds()
+	now := time.Now()
+	remaining := deadline.Sub(now)
+	if remaining <= 0 {
+		return 1
+	}
+	total := deadline.Sub(createdAt)
+	if total <= 0 {
+		return 0
+	}
+	window := time.Duration(float64(total) * (float64(startPercent) / 100.0))
+	if window <= 0 {
+		return 0
+	}
+	if remaining >= window {
+		return 0
+	}
+
+	ratio := 1 - remaining.Seconds()/window.Seconds()
 	if ratio <= 0 {
 		return 0
 	}
 	if ratio >= 1 {
 		return 1
 	}
-	return math.Pow(ratio, 0.92)
+	return ratio
 }
 
 func boardBackgroundColor() walk.Color {
@@ -862,9 +873,9 @@ func blendColor(left, right walk.Color, ratio float64) walk.Color {
 	lr, lg, lb := colorBytes(left)
 	rr, rg, rb := colorBytes(right)
 	return rgb(
-		byte(float64(lr)+float64(rr-lr)*ratio),
-		byte(float64(lg)+float64(rg-lg)*ratio),
-		byte(float64(lb)+float64(rb-lb)*ratio),
+		byte(float64(lr)+float64(int(rr)-int(lr))*ratio),
+		byte(float64(lg)+float64(int(rg)-int(lg))*ratio),
+		byte(float64(lb)+float64(int(rb)-int(lb))*ratio),
 	)
 }
 

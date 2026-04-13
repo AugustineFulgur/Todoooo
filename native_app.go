@@ -350,7 +350,7 @@ func (a *NativeApp) applyTodos(todos []Todo) {
 		a.headerWidget.SetCountText(len(todos))
 	}
 	if a.dockWidget != nil {
-		a.dockWidget.SetCountText(len(todos))
+		a.dockWidget.SetCounts(len(todos), todoKindCounts(todos))
 	}
 	if a.sortWidget != nil {
 		a.sortWidget.SetSelected(a.sortMode)
@@ -501,9 +501,7 @@ func (a *NativeApp) openAddDialog() {
 	if err := (Dialog{
 		AssignTo:  &dlg,
 		Title:     "新增待办",
-		FixedSize: true,
 		MinSize:   Size{Width: 520, Height: 600},
-		MaxSize:   Size{Width: 520, Height: 600},
 		Background: SolidColorBrush{
 			Color: boardBackgroundColor(),
 		},
@@ -1072,9 +1070,9 @@ func (a *NativeApp) openDetailDialog(id string) {
 						AssignTo:      &detailsEdit,
 						Text:          todo.Details,
 						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
-						CompactHeight: true,
+						StretchFactor: 1,
 						VScroll:       true,
-						MinSize:       Size{Height: 140},
+						MinSize:       Size{Height: 72},
 					},
 				},
 			},
@@ -1112,7 +1110,7 @@ func (a *NativeApp) openDetailDialog(id string) {
 						Text:          progressTimeline(todo.Progress),
 						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
 						ReadOnly:      true,
-						CompactHeight: true,
+						StretchFactor: 1,
 						VScroll:       true,
 						MinSize:       Size{Height: 170},
 					},
@@ -1123,8 +1121,9 @@ func (a *NativeApp) openDetailDialog(id string) {
 					TextEdit{
 						AssignTo:      &progressInputEdit,
 						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
+						StretchFactor: 1,
 						VScroll:       true,
-						MinSize:       Size{Height: 72},
+						MinSize:       Size{Height: 140},
 					},
 					Composite{
 						AssignTo:   &progressAddHost,
@@ -1653,7 +1652,7 @@ func (a *NativeApp) openHistoryDetailDialog(id string) bool {
 						Text:          detailText(todo.Details),
 						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
 						ReadOnly:      true,
-						CompactHeight: true,
+						StretchFactor: 1,
 						VScroll:       true,
 						MinSize:       Size{Height: 140},
 					},
@@ -1674,7 +1673,7 @@ func (a *NativeApp) openHistoryDetailDialog(id string) bool {
 						Text:          progressTimeline(todo.Progress),
 						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
 						ReadOnly:      true,
-						CompactHeight: true,
+						StretchFactor: 1,
 						VScroll:       true,
 						MinSize:       Size{Height: 180},
 					},
@@ -1842,7 +1841,7 @@ func (a *NativeApp) openSettingsDialog() {
 						},
 						Children: []Widget{
 							Label{
-								Text:      "\u53d8\u8272\u65f6\u95f4",
+								Text:      "\u53d8\u8272\u9636\u6bb5",
 								TextColor: rgb(76, 88, 100),
 								MinSize:   Size{Width: 92},
 							},
@@ -1852,13 +1851,13 @@ func (a *NativeApp) openSettingsDialog() {
 								Decimals:           0,
 								Increment:          1,
 								MinValue:           1,
-								MaxValue:           365,
+								MaxValue:           100,
 								SpinButtonsVisible: true,
 								MinSize:            Size{Width: 120},
 								MaxSize:            Size{Width: 120},
 							},
 							Label{
-								Text:      "\u5929",
+								Text:      "%",
 								TextColor: rgb(112, 121, 130),
 							},
 							HSpacer{},
@@ -1958,7 +1957,7 @@ func (a *NativeApp) openSettingsDialog() {
 
 	prepareOverlayDialog(dlg)
 	a.trackDialogWindow(dlg)
-	if _, err := NewOverlayDialogHeaderWidget(headerHost, "\u8bbe\u7f6e", "\u5148\u8c03\u6574\u4e34\u671f\u53d8\u8272\u65f6\u95f4\uff0c\u540e\u9762\u7684\u6269\u5c55\u9879\u4e5f\u9884\u7559\u597d\u4e86\u3002", func() {
+	if _, err := NewOverlayDialogHeaderWidget(headerHost, "\u8bbe\u7f6e", "", func() {
 		startWindowDrag(dlg.Handle())
 	}); err != nil {
 		dlg.Dispose()
@@ -2596,7 +2595,10 @@ func (a *NativeApp) syncWindowSize() {
 }
 
 func (a *NativeApp) expandedChromeHeight() int {
-	headerHeight := 82
+	headerHeight := 150
+	if a.headerWidget != nil {
+		headerHeight = a.headerWidget.CurrentHeight()
+	}
 	if a.sortWidget != nil {
 		headerHeight += 10 + a.sortWidget.CurrentHeight()
 	}
@@ -2604,8 +2606,14 @@ func (a *NativeApp) expandedChromeHeight() int {
 	const (
 		windowMargins = 32
 		stackSpacing  = 24
-		footerHeight  = 42
 	)
+	footerHeight := 42
+	if a.actionWidget != nil {
+		footerHeight = a.actionWidget.CurrentHeight()
+	}
+	if a.searchWidget != nil && a.searchWidget.CurrentHeight() > footerHeight {
+		footerHeight = a.searchWidget.CurrentHeight()
+	}
 
 	return headerHeight + footerHeight + windowMargins + stackSpacing
 }
@@ -3043,8 +3051,8 @@ func applyOverlayPopupChrome(hwnd win.HWND) {
 	}
 
 	style := uint32(win.GetWindowLong(hwnd, win.GWL_STYLE))
-	style &^= win.WS_POPUP | win.WS_THICKFRAME | win.WS_MINIMIZEBOX | win.WS_MAXIMIZEBOX
-	style |= win.WS_CAPTION | win.WS_SYSMENU
+	style &^= win.WS_POPUP | win.WS_MINIMIZEBOX | win.WS_MAXIMIZEBOX
+	style |= win.WS_CAPTION | win.WS_SYSMENU | win.WS_THICKFRAME
 	win.SetWindowLong(hwnd, win.GWL_STYLE, int32(style))
 
 	exStyle := uint32(win.GetWindowLong(hwnd, win.GWL_EXSTYLE))
@@ -3221,6 +3229,19 @@ func filterTodosByTags(todos []Todo, tags []string) []Todo {
 		}
 	}
 	return out
+}
+
+func todoKindCounts(todos []Todo) map[TodoType]int {
+	counts := map[TodoType]int{
+		TodoUrgentImportant:    0,
+		TodoUrgentNotImportant: 0,
+		TodoImportantNotUrgent: 0,
+		TodoNeitherImportant:   0,
+	}
+	for _, todo := range todos {
+		counts[todo.Kind]++
+	}
+	return counts
 }
 
 func hasAnyTag(todoTags []string, filter []string) bool {

@@ -25,7 +25,7 @@ func NewOverlayHeaderWidget(parent walk.Container, title, subtitle string, onDra
 		subtitle:  subtitle,
 		countText: "0 \u5f85\u5904\u7406",
 		onDrag:    onDrag,
-		height:    82,
+		height:    150,
 	}
 
 	cw, err := walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
@@ -80,6 +80,10 @@ func (w *OverlayHeaderWidget) CreateLayoutItem(ctx *walk.LayoutContext) walk.Lay
 	return &overlayFixedLayoutItem{minHeight: w.height, idealHeight: w.height}
 }
 
+func (w *OverlayHeaderWidget) CurrentHeight() int {
+	return w.height
+}
+
 func (w *OverlayHeaderWidget) SetCountText(count int) {
 	text := fmt.Sprintf("%d \u5f85\u5904\u7406", count)
 	if text == w.countText {
@@ -95,19 +99,19 @@ func (w *OverlayHeaderWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error
 	scale := overlayScale(bounds.Width, 420)
 	s := func(v int) int { return overlayMetric(v, scale) }
 
-	panelBounds := walk.Rectangle{X: 0, Y: s(5), Width: bounds.Width - 1, Height: bounds.Height - s(10)}
-	fillRoundedRectOnCanvas(canvas, rgb(239, 244, 249), rgb(239, 244, 249), walk.Rectangle{X: s(3), Y: s(9), Width: panelBounds.Width - s(6), Height: panelBounds.Height - s(2)}, s(22))
-	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), panelBounds, s(22))
-	fillRoundedRectOnCanvas(canvas, rgb(43, 103, 162), rgb(43, 103, 162), walk.Rectangle{X: s(16), Y: s(17), Width: s(58), Height: s(5)}, s(3))
-	fillRoundedRectOnCanvas(canvas, rgb(233, 241, 249), rgb(233, 241, 249), walk.Rectangle{X: s(16), Y: s(29), Width: s(90), Height: s(18)}, s(9))
+	panelBounds := walk.Rectangle{X: 0, Y: s(8), Width: bounds.Width - 1, Height: bounds.Height - s(14)}
+	fillRoundedRectOnCanvas(canvas, rgb(239, 244, 249), rgb(239, 244, 249), walk.Rectangle{X: s(4), Y: s(12), Width: panelBounds.Width - s(8), Height: panelBounds.Height - s(3)}, s(24))
+	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), panelBounds, s(24))
+	fillRoundedRectOnCanvas(canvas, rgb(43, 103, 162), rgb(43, 103, 162), walk.Rectangle{X: s(18), Y: s(24), Width: s(66), Height: s(6)}, s(3))
+	fillRoundedRectOnCanvas(canvas, rgb(233, 241, 249), rgb(233, 241, 249), walk.Rectangle{X: s(18), Y: s(40), Width: s(104), Height: s(20)}, s(10))
 
 	countWidth := clampInt(28+len([]rune(w.countText))*14, 96, 162)
-	countBounds := walk.Rectangle{X: bounds.Width - countWidth - s(14), Y: s(17), Width: countWidth, Height: s(30)}
-	fillRoundedRectOnCanvas(canvas, rgb(232, 240, 248), rgb(206, 219, 233), countBounds, s(15))
+	countBounds := walk.Rectangle{X: bounds.Width - countWidth - s(18), Y: s(24), Width: countWidth + s(8), Height: s(38)}
+	fillRoundedRectOnCanvas(canvas, rgb(232, 240, 248), rgb(206, 219, 233), countBounds, s(18))
 	_ = canvas.DrawTextPixels(w.countText, w.countFont, rgb(29, 61, 96), countBounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 
-	_ = canvas.DrawTextPixels(w.title, w.titleFont, rgb(21, 28, 34), walk.Rectangle{X: s(16), Y: s(20), Width: bounds.Width - countWidth - s(48), Height: s(28)}, walk.TextSingleLine|walk.TextNoPrefix)
-	_ = canvas.DrawTextPixels(w.subtitle, w.subtitleFont, rgb(92, 101, 111), walk.Rectangle{X: s(16), Y: s(51), Width: bounds.Width - s(28), Height: s(18)}, walk.TextSingleLine|walk.TextEndEllipsis|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels(w.title, w.titleFont, rgb(21, 28, 34), walk.Rectangle{X: s(18), Y: s(30), Width: bounds.Width - countWidth - s(64), Height: s(36)}, walk.TextSingleLine|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels(w.subtitle, w.subtitleFont, rgb(92, 101, 111), walk.Rectangle{X: s(18), Y: s(78), Width: bounds.Width - s(36), Height: s(28)}, walk.TextSingleLine|walk.TextEndEllipsis|walk.TextNoPrefix)
 	return nil
 }
 
@@ -256,6 +260,10 @@ func (w *OverlayActionWidget) CreateLayoutItem(ctx *walk.LayoutContext) walk.Lay
 	return &overlayFixedLayoutItem{minHeight: w.height, idealHeight: w.height}
 }
 
+func (w *OverlayActionWidget) CurrentHeight() int {
+	return w.height
+}
+
 func (w *OverlayActionWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	bounds := w.ClientBoundsPixels()
 	paintOverlayBackground(canvas, bounds)
@@ -360,6 +368,10 @@ func (w *OverlayMiniActionWidget) SetLabel(label string) {
 
 func (w *OverlayMiniActionWidget) CreateLayoutItem(ctx *walk.LayoutContext) walk.LayoutItem {
 	return &overlayFixedWidthLayoutItem{width: w.width, height: w.height}
+}
+
+func (w *OverlayMiniActionWidget) CurrentHeight() int {
+	return w.height
 }
 
 func (w *OverlayMiniActionWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
@@ -602,8 +614,8 @@ func NewOverlaySortWidget(parent walk.Container, selected SortMode, onChange fun
 		selected:        selected,
 		onChange:        onChange,
 		onLayoutChanged: onLayoutChanged,
-		rowHeight:       40,
-		expandedHeight:  92,
+		rowHeight:       54,
+		expandedHeight:  132,
 	}
 
 	cw, err := walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
@@ -718,7 +730,7 @@ func (w *OverlaySortWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	_ = canvas.DrawTextPixels("\u6392\u5e8f\u65b9\u5f0f", w.labelFont, rgb(90, 100, 111), walk.Rectangle{X: s(14), Y: 0, Width: s(94), Height: w.rowHeight - s(2)}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
 
 	selectedWidth := clampInt(bounds.Width-s(154), s(128), s(176))
-	selectedBounds := walk.Rectangle{X: bounds.Width - selectedWidth - s(36), Y: s(6), Width: selectedWidth, Height: s(26)}
+	selectedBounds := walk.Rectangle{X: bounds.Width - selectedWidth - s(36), Y: s(12), Width: selectedWidth, Height: s(30)}
 	fillRoundedRectOnCanvas(canvas, rgb(234, 241, 248), rgb(210, 221, 233), selectedBounds, s(13))
 	_ = canvas.DrawTextPixels(sortModeLabel(w.selected), w.valueFont, rgb(33, 62, 94), walk.Rectangle{X: selectedBounds.X + s(12), Y: selectedBounds.Y, Width: selectedBounds.Width - s(26), Height: selectedBounds.Height}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
 	_ = canvas.DrawTextPixels(sortChevron(w.expanded), w.valueFont, rgb(86, 99, 111), walk.Rectangle{X: bounds.Width - s(34), Y: 0, Width: s(20), Height: w.rowHeight - s(2)}, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
@@ -727,10 +739,10 @@ func (w *OverlaySortWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 		return nil
 	}
 
-	panelBounds := walk.Rectangle{X: 0, Y: s(44), Width: bounds.Width - 1, Height: bounds.Height - s(45)}
+	panelBounds := walk.Rectangle{X: 0, Y: s(58), Width: bounds.Width - 1, Height: bounds.Height - s(60)}
 	fillRoundedRectOnCanvas(canvas, rgb(252, 254, 255), rgb(223, 228, 236), panelBounds, s(16))
 
-	_ = canvas.DrawTextPixels("\u5feb\u6377\u6392\u5e8f", w.labelFont, rgb(104, 112, 120), walk.Rectangle{X: s(14), Y: s(48), Width: s(90), Height: s(18)}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
+	_ = canvas.DrawTextPixels("\u5feb\u6377\u6392\u5e8f", w.labelFont, rgb(104, 112, 120), walk.Rectangle{X: s(14), Y: s(66), Width: s(90), Height: s(20)}, walk.TextSingleLine|walk.TextVCenter|walk.TextNoPrefix)
 
 	for _, mode := range []SortMode{SortModePriority, SortModeDeadline} {
 		optionBounds := w.optionBounds(mode)
@@ -748,7 +760,7 @@ func (w *OverlaySortWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 			fillColor = rgb(223, 234, 245)
 			borderColor = rgb(194, 211, 228)
 		}
-		fillRoundedRectOnCanvas(canvas, fillColor, borderColor, optionBounds, 14)
+		fillRoundedRectOnCanvas(canvas, fillColor, borderColor, optionBounds, 16)
 		_ = canvas.DrawTextPixels(sortModeOptionLabel(mode), w.optionFont, textColor, optionBounds, walk.TextSingleLine|walk.TextCenter|walk.TextVCenter|walk.TextNoPrefix)
 	}
 
@@ -772,16 +784,16 @@ func (w *OverlaySortWidget) hitTest(x, y int) string {
 
 func (w *OverlaySortWidget) optionBounds(mode SortMode) walk.Rectangle {
 	bounds := w.ClientBoundsPixels()
-	baseY := 64
+	baseY := 92
 	width := (bounds.Width - 44) / 2
 	if width < 118 {
 		width = 118
 	}
 	switch mode {
 	case SortModePriority:
-		return walk.Rectangle{X: 14, Y: baseY, Width: width, Height: 28}
+		return walk.Rectangle{X: 14, Y: baseY, Width: width, Height: 34}
 	default:
-		return walk.Rectangle{X: bounds.Width - width - 14, Y: baseY, Width: width, Height: 28}
+		return walk.Rectangle{X: bounds.Width - width - 14, Y: baseY, Width: width, Height: 34}
 	}
 }
 
@@ -810,20 +822,24 @@ func (w *OverlaySortWidget) selectMode(mode SortMode) {
 
 type DockTabWidget struct {
 	*walk.CustomWidget
-	countText string
-	onClick   func()
-	countFont *walk.Font
-	width     int
-	height    int
-	pressed   bool
+	countText    string
+	onClick      func()
+	countFont    *walk.Font
+	width        int
+	height       int
+	pressed      bool
+	displayMode  int
+	totalCount   int
+	kindCounts   map[TodoType]int
 }
 
 func NewDockTabWidget(parent walk.Container, onClick func()) (*DockTabWidget, error) {
 	widget := &DockTabWidget{
-		countText: "0",
-		onClick:   onClick,
-		width:     54,
-		height:    54,
+		countText:  "0",
+		onClick:    onClick,
+		width:      54,
+		height:     54,
+		kindCounts: map[TodoType]int{},
 	}
 
 	cw, err := walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
@@ -855,11 +871,13 @@ func NewDockTabWidget(parent walk.Container, onClick func()) (*DockTabWidget, er
 	widget.countFont = countFont
 
 	widget.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
-		if button != walk.LeftButton {
-			return
+		switch button {
+		case walk.LeftButton:
+			widget.pressed = true
+			_ = widget.Invalidate()
+		case walk.RightButton:
+			widget.advanceDisplayMode()
 		}
-		widget.pressed = true
-		_ = widget.Invalidate()
 	})
 	widget.MouseUp().Attach(func(x, y int, button walk.MouseButton) {
 		if button != walk.LeftButton {
@@ -881,15 +899,71 @@ func (w *DockTabWidget) CreateLayoutItem(ctx *walk.LayoutContext) walk.LayoutIte
 }
 
 func (w *DockTabWidget) SetCountText(count int) {
+	w.totalCount = count
+	w.updateDisplay()
+}
+
+func (w *DockTabWidget) SetCounts(total int, kindCounts map[TodoType]int) {
+	w.totalCount = total
+	if w.kindCounts == nil {
+		w.kindCounts = map[TodoType]int{}
+	}
+	for key := range w.kindCounts {
+		delete(w.kindCounts, key)
+	}
+	for kind, count := range kindCounts {
+		w.kindCounts[kind] = count
+	}
+	w.updateDisplay()
+}
+
+func (w *DockTabWidget) advanceDisplayMode() {
+	w.displayMode++
+	if w.displayMode > len(todoTypes) {
+		w.displayMode = 0
+	}
+	w.updateDisplay()
+}
+
+func (w *DockTabWidget) updateDisplay() {
+	count := w.currentCount()
 	text := fmt.Sprintf("%d", count)
 	if count > 99 {
 		text = "99+"
 	}
 	if text == w.countText {
+		_ = w.updateToolTip()
+		_ = w.Invalidate()
 		return
 	}
 	w.countText = text
+	_ = w.updateToolTip()
 	_ = w.Invalidate()
+}
+
+func (w *DockTabWidget) currentCount() int {
+	if w.displayMode <= 0 || w.displayMode > len(todoTypes) {
+		return w.totalCount
+	}
+	return w.kindCounts[todoTypes[w.displayMode-1]]
+}
+
+func (w *DockTabWidget) currentKind() (TodoType, bool) {
+	if w.displayMode <= 0 || w.displayMode > len(todoTypes) {
+		return "", false
+	}
+	return todoTypes[w.displayMode-1], true
+}
+
+func (w *DockTabWidget) updateToolTip() error {
+	lines := []string{
+		fmt.Sprintf("总待办：%d", w.totalCount),
+		fmt.Sprintf("%s：%d", string(TodoUrgentImportant), w.kindCounts[TodoUrgentImportant]),
+		fmt.Sprintf("%s：%d", string(TodoUrgentNotImportant), w.kindCounts[TodoUrgentNotImportant]),
+		fmt.Sprintf("%s：%d", string(TodoImportantNotUrgent), w.kindCounts[TodoImportantNotUrgent]),
+		fmt.Sprintf("%s：%d", string(TodoNeitherImportant), w.kindCounts[TodoNeitherImportant]),
+	}
+	return w.SetToolTipText(strings.Join(lines, "\n"))
 }
 
 func (w *DockTabWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
@@ -903,6 +977,12 @@ func (w *DockTabWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
 	fill := rgb(252, 254, 255)
 	border := rgb(214, 223, 234)
 	textColor := rgb(29, 61, 96)
+	if kind, ok := w.currentKind(); ok {
+		accent, _ := todoTypeColors(kind)
+		fill = blendColor(rgb(252, 254, 255), accent, 0.18)
+		border = blendColor(rgb(214, 223, 234), accent, 0.62)
+		textColor = accent
+	}
 	if w.pressed {
 		fill = rgb(244, 249, 253)
 		border = rgb(199, 213, 228)

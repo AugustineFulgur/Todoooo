@@ -452,7 +452,7 @@ func cloneTodos(src []Todo) []Todo {
 
 func defaultAppSettings() AppSettings {
 	return AppSettings{
-		UrgencyTintDays: 15,
+		UrgencyTintDays: 35,
 		ReminderLeadMin: 0,
 		AutoStart:       false,
 		AutoStartAsked:  false,
@@ -465,8 +465,8 @@ func normalizeAppSettings(settings AppSettings) AppSettings {
 	if settings.UrgencyTintDays <= 0 {
 		settings.UrgencyTintDays = defaultAppSettings().UrgencyTintDays
 	}
-	if settings.UrgencyTintDays > 365 {
-		settings.UrgencyTintDays = 365
+	if settings.UrgencyTintDays > 100 {
+		settings.UrgencyTintDays = 100
 	}
 	if settings.ReminderLeadMin < 0 {
 		settings.ReminderLeadMin = 0
