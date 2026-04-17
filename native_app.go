@@ -34,15 +34,20 @@ var (
 	mainWndProcMap                 = map[win.HWND]*NativeApp{}
 	mouseHookMu                    sync.Mutex
 	mouseHookApp                   *NativeApp
+	wtsapi32DLL                    = windows.NewLazySystemDLL("wtsapi32.dll")
+	procWTSRegisterSessionNotification   = wtsapi32DLL.NewProc("WTSRegisterSessionNotification")
+	procWTSUnRegisterSessionNotification = wtsapi32DLL.NewProc("WTSUnRegisterSessionNotification")
 )
 
 const (
 	layeredAlphaFlag   = 0x00000002
 	overlayOpacity     = 250
-	removalHideRatio   = 0.80
 	expandedWindowWidth = 480
 	whMouseLL          = 14
 	hcAction           = 0
+	wmWTSSessionChange = 0x02B1
+	wtsSessionUnlock   = 0x8
+	notifThisSession   = 0
 )
 
 type msllhookstruct struct {
@@ -65,7 +70,7 @@ type NativeApp struct {
 	actionWidget        *OverlayActionWidget
 	searchWidget        *OverlayMiniActionWidget
 	dockWidget          *DockTabWidget
-	scrollView          *walk.ScrollView
+	listHost            *walk.Composite
 	listWidget          *TodoBoardWidget
 	rootLayout          *walk.BoxLayout
 	painter             *CardPainter
@@ -97,7 +102,6 @@ type NativeApp struct {
 	tagFilter           []string
 	settings            AppSettings
 	dialogDepth         int
-	windowAnimating     bool
 	mainWndProcOrig     uintptr
 	lastExpandedBounds  walk.Rectangle
 	internalPointerActive bool
@@ -105,6 +109,9 @@ type NativeApp struct {
 	processID           uint32
 	trackedWindowsMu    sync.RWMutex
 	trackedWindows      map[win.HWND]struct{}
+	sessionNotifyRegistered bool
+	lastUnlockSummaryDay    string
+	summaryDialog           *walk.Dialog
 }
 
 func NewNativeApp(store *Store) (*NativeApp, error) {
@@ -116,7 +123,7 @@ func NewNativeApp(store *Store) (*NativeApp, error) {
 		collapsedWidth:  60,
 		collapsedHeight: 60,
 		minWindowHeight: 0,
-		maxWindowHeight: 900,
+		maxWindowHeight: 1600,
 		maxHeightRatio:  0.80,
 		deadlinePoll:    15 * time.Second,
 		notified:        map[string]bool{},
@@ -142,13 +149,32 @@ func (a *NativeApp) Run() error {
 	a.painter = painter
 	a.applySettings(a.settings)
 
-	listWidget, err := NewTodoBoardWidget(a.scrollView, painter, a.completeTodo, a.openPostponeDialog, a.openDetailDialog, "\u63a8\u8fdf", true, true)
+	listWidget, err := NewTodoBoardWidget(a.listHost, painter, a.completeTodo, a.openPostponeDialog, a.openDetailDialog, "\u63a8\u8fdf", true, true, true)
 	if err != nil {
 		return err
 	}
 	a.listWidget = listWidget
 	a.listWidget.SetWidthHint(a.boardWidthHint())
 	a.listWidget.SetSkin(a.backgroundBitmap, a.settings.BackgroundAlpha)
+	if a.listHost != nil {
+		resizeListViewport := func() {
+			if a.listWidget == nil || a.listHost == nil {
+				return
+			}
+			bounds := a.listHost.ClientBoundsPixels()
+			if bounds.Width <= 0 || bounds.Height <= 0 {
+				return
+			}
+			a.listWidget.SetWidthHint(a.boardWidthHint())
+			_ = a.listWidget.SetBoundsPixels(bounds)
+		}
+		a.listHost.SizeChanged().Attach(func() {
+			resizeListViewport()
+		})
+		a.mw.SizeChanged().Attach(func() {
+			resizeListViewport()
+		})
+	}
 
 	a.applyTodos(a.store.List())
 	a.startDeadlineWatcher()
@@ -203,11 +229,10 @@ func (a *NativeApp) buildUI() error {
 					Spacing:     10,
 				},
 			},
-			ScrollView{
-				AssignTo:        &a.scrollView,
-				StretchFactor:   1,
-				HorizontalFixed: true,
-				Background:      SolidColorBrush{Color: boardBackgroundColor()},
+			Composite{
+				AssignTo:       &a.listHost,
+				StretchFactor:  1,
+				Background:     SolidColorBrush{Color: boardBackgroundColor()},
 				Layout: VBox{
 					MarginsZero: true,
 					SpacingZero: true,
@@ -238,7 +263,11 @@ func (a *NativeApp) buildUI() error {
 
 	a.installMainWndProc()
 	a.registerTrackedWindow(a.mw.Handle())
+	a.registerSessionNotifications()
 	_ = a.mw.SetDoubleBuffering(true)
+	if a.listHost != nil {
+		_ = a.listHost.SetDoubleBuffering(true)
+	}
 	if layout, ok := a.mw.Layout().(*walk.BoxLayout); ok {
 		a.rootLayout = layout
 	}
@@ -373,56 +402,14 @@ func (a *NativeApp) applyTodos(todos []Todo) {
 }
 
 func (a *NativeApp) completeTodo(id string) {
-	if a.listWidget == nil || !a.listWidget.BeginRemoval(id) {
+	todos, err := a.store.Complete(id)
+	if err != nil {
+		a.showError("\u79fb\u9664\u5931\u8d25", err)
 		return
 	}
 
-	go func() {
-		target := a.listWidget.RemovalTargetOffset(id)
-		const frame = 16 * time.Millisecond
-		const duration = 240 * time.Millisecond
-		start := time.Now()
-		for {
-			elapsed := time.Since(start)
-			if elapsed > duration {
-				elapsed = duration
-			}
-			progress := float64(elapsed) / float64(duration)
-			if a.mw == nil || a.mw.IsDisposed() {
-				return
-			}
-
-			a.mw.Synchronize(func() {
-				if a.listWidget != nil {
-					offset := int(float64(target) * progress)
-					fade := removalFadeForProgress(progress)
-					a.listWidget.SetRemovalOffset(id, offset)
-					a.listWidget.SetRemovalFade(id, fade)
-				}
-			})
-
-			if elapsed >= duration {
-				break
-			}
-			time.Sleep(frame)
-		}
-
-		if a.mw == nil || a.mw.IsDisposed() {
-			return
-		}
-
-		a.mw.Synchronize(func() {
-			todos, err := a.store.Complete(id)
-			if err != nil {
-				a.listWidget.CancelRemoval(id)
-				a.showError("\u79fb\u9664\u5931\u8d25", err)
-				return
-			}
-
-			a.applyTodos(todos)
-			a.refreshHistoryMenu()
-		})
-	}()
+	a.applyTodos(todos)
+	a.refreshHistoryMenu()
 }
 
 func (a *NativeApp) openAddDialog() {
@@ -1467,6 +1454,7 @@ func (a *NativeApp) openHistoryDialog() {
 
 	prepareOverlayDialog(dlg)
 	a.trackDialogWindow(dlg)
+	_ = scrollView.SetDoubleBuffering(true)
 	_ = dlg.SetBoundsPixels(walk.Rectangle{
 		X:      work.X + (work.Width-panelWidth)/2,
 		Y:      work.Y + (work.Height-640)/2,
@@ -1513,7 +1501,7 @@ func (a *NativeApp) openHistoryDialog() {
 			listWidget.SetTodos(a.store.HistoryList())
 			a.refreshHistoryMenu()
 		}
-	}, "\u5220\u9664", false, true)
+	}, "\u5220\u9664", false, true, false)
 	if err != nil {
 		dlg.Dispose()
 		a.showError("\u521b\u5efa\u5386\u53f2\u5217\u8868\u5931\u8d25", err)
@@ -1991,9 +1979,6 @@ func (a *NativeApp) openSettingsDialog() {
 }
 
 func (a *NativeApp) showWindow() {
-	if a.animateExpandFromDock() {
-		return
-	}
 	a.setWindowCollapsed(false, true)
 }
 
@@ -2174,6 +2159,24 @@ func (a *NativeApp) uninstallMainWndProc() {
 	mainWndProcMu.Unlock()
 }
 
+func (a *NativeApp) registerSessionNotifications() {
+	if a == nil || a.mw == nil || a.mw.IsDisposed() || a.sessionNotifyRegistered {
+		return
+	}
+	ret, _, _ := procWTSRegisterSessionNotification.Call(uintptr(a.mw.Handle()), uintptr(notifThisSession))
+	if ret != 0 {
+		a.sessionNotifyRegistered = true
+	}
+}
+
+func (a *NativeApp) unregisterSessionNotifications() {
+	if a == nil || a.mw == nil || a.mw.IsDisposed() || !a.sessionNotifyRegistered {
+		return
+	}
+	procWTSUnRegisterSessionNotification.Call(uintptr(a.mw.Handle()))
+	a.sessionNotifyRegistered = false
+}
+
 func (a *NativeApp) registerTrackedWindow(hwnd win.HWND) {
 	if a == nil || hwnd == 0 {
 		return
@@ -2276,7 +2279,16 @@ func (a *NativeApp) handleGlobalMouseDown(pt win.POINT) {
 	if a == nil || a.mw == nil || a.mw.IsDisposed() {
 		return
 	}
-	if a.quitting || a.collapsed || !a.visible || a.dialogDepth > 0 || a.windowAnimating {
+	if a.summaryDialog != nil && !a.summaryDialog.IsDisposed() {
+		if a.pointInsideWindow(pt, a.summaryDialog.Handle()) {
+			return
+		}
+		a.mw.Synchronize(func() {
+			a.closeUnlockSummaryDialog()
+		})
+		return
+	}
+	if a.quitting || a.collapsed || !a.visible || a.dialogDepth > 0 {
 		return
 	}
 
@@ -2285,11 +2297,22 @@ func (a *NativeApp) handleGlobalMouseDown(pt win.POINT) {
 	}
 
 	a.mw.Synchronize(func() {
-		if a.mw == nil || a.mw.IsDisposed() || a.quitting || a.collapsed || !a.visible || a.dialogDepth > 0 || a.windowAnimating {
+		if a.mw == nil || a.mw.IsDisposed() || a.quitting || a.collapsed || !a.visible || a.dialogDepth > 0 {
 			return
 		}
 		a.collapseWindow()
 	})
+}
+
+func (a *NativeApp) pointInsideWindow(pt win.POINT, hwnd win.HWND) bool {
+	if hwnd == 0 || !win.IsWindowVisible(hwnd) {
+		return false
+	}
+	var rect win.RECT
+	if !win.GetWindowRect(hwnd, &rect) {
+		return false
+	}
+	return pt.X >= rect.Left && pt.X < rect.Right && pt.Y >= rect.Top && pt.Y < rect.Bottom
 }
 
 func (a *NativeApp) primeWindowState() {
@@ -2300,9 +2323,9 @@ func (a *NativeApp) primeWindowState() {
 	work := desktopWorkArea()
 	a.windowWidth = targetExpandedWindowWidth(work.Width)
 	contentHeight := a.expandedChromeHeight() + a.listHeight()
-	minClientHeight := a.minimumExpandedClientHeight()
+	minClientHeight := a.minimumExpandedClientHeight(work.Height)
 	maxClientHeight := int(float64(work.Height)*a.maxHeightRatio) - a.windowDecorationHeight()
-	maxClientHeight = clampInt(maxClientHeight, minClientHeight, a.maxWindowHeight)
+	maxClientHeight = clampInt(maxClientHeight, minClientHeight, maxInt(a.maxWindowHeight, minClientHeight))
 	clientHeight := clampInt(contentHeight, minClientHeight, maxClientHeight)
 
 	a.lastExpandedBounds = walk.Rectangle{
@@ -2361,134 +2384,182 @@ func (a *NativeApp) hideWindow() {
 	a.collapseWindow()
 }
 
-func (a *NativeApp) collapseWindow() {
-	a.rememberExpandedBounds()
-	if a.animateCollapseToDock() {
+func (a *NativeApp) handleSessionUnlock() {
+	today := time.Now().Format("2006-01-02")
+	if a.lastUnlockSummaryDay == today {
 		return
 	}
-	a.setWindowCollapsed(true, false)
+	a.lastUnlockSummaryDay = today
+	a.openUnlockSummaryDialog()
 }
 
-func (a *NativeApp) animateCollapseToDock() bool {
-	if a.mw == nil || a.mw.IsDisposed() || a.collapsed || a.windowAnimating {
-		return false
+func (a *NativeApp) openUnlockSummaryDialog() {
+	if a.mw == nil || a.mw.IsDisposed() {
+		return
+	}
+	if a.summaryDialog != nil && !a.summaryDialog.IsDisposed() {
+		a.summaryDialog.SetFocus()
+		return
 	}
 
-	start := a.mw.BoundsPixels()
-	if start.Width <= 0 || start.Height <= 0 {
-		return false
+	todos := sortVisibleTodos(a.store.List(), a.sortMode)
+	summaryText := a.buildUnlockSummary(todos)
+
+	var dlg *walk.Dialog
+	var headerHost *walk.Composite
+	var closeHost *walk.Composite
+
+	if err := (Dialog{
+		AssignTo:  &dlg,
+		Title:     "今日待办简报",
+		FixedSize: true,
+		MinSize:   Size{Width: 680, Height: 620},
+		MaxSize:   Size{Width: 680, Height: 620},
+		Background: SolidColorBrush{
+			Color: boardBackgroundColor(),
+		},
+		Layout: VBox{
+			Margins: Margins{Left: 18, Top: 18, Right: 18, Bottom: 18},
+			Spacing: 12,
+		},
+		Font: Font{Family: "Microsoft YaHei UI", PointSize: 10},
+		OnKeyDown: func(key walk.Key) {
+			if key == walk.KeyEscape {
+				dlg.Cancel()
+			}
+		},
+		Children: []Widget{
+			Composite{
+				AssignTo:   &headerHost,
+				Background: SolidColorBrush{Color: boardBackgroundColor()},
+				Layout: VBox{
+					MarginsZero: true,
+					SpacingZero: true,
+				},
+			},
+			Composite{
+				Background: SolidColorBrush{Color: rgb(252, 254, 255)},
+				Layout: VBox{
+					Margins: Margins{Left: 16, Top: 16, Right: 16, Bottom: 16},
+					Spacing: 8,
+				},
+				Children: []Widget{
+					Label{
+						Text:      fmt.Sprintf("当前共 %d 项待办。点击窗口外部任意位置可关闭。", len(todos)),
+						TextColor: rgb(98, 107, 116),
+					},
+					TextEdit{
+						Text:          summaryText,
+						Background:    SolidColorBrush{Color: rgb(247, 250, 253)},
+						ReadOnly:      true,
+						StretchFactor: 1,
+						VScroll:       true,
+					},
+				},
+			},
+			Composite{
+				Background: SolidColorBrush{Color: rgb(252, 254, 255)},
+				Layout: HBox{
+					Margins: Margins{Left: 16, Top: 14, Right: 16, Bottom: 14},
+					Spacing: 10,
+				},
+				Children: []Widget{
+					HSpacer{},
+					Composite{
+						AssignTo:   &closeHost,
+						Background: SolidColorBrush{Color: rgb(252, 254, 255)},
+						Layout: VBox{
+							MarginsZero: true,
+							SpacingZero: true,
+						},
+					},
+				},
+			},
+		},
+	}).Create(a.mw); err != nil {
+		a.showError("打开解锁简报失败", err)
+		return
 	}
+
+	a.summaryDialog = dlg
+	prepareOverlayDialog(dlg)
+	a.trackDialogWindow(dlg)
+	if _, err := NewOverlayDialogHeaderWidget(headerHost, "今日待办简报", "每日首次解锁后展示当前待办及最近进展。", func() {
+		startWindowDrag(dlg.Handle())
+	}); err != nil {
+		dlg.Dispose()
+		a.summaryDialog = nil
+		a.showError("创建解锁简报头部失败", err)
+		return
+	}
+	if _, err := NewOverlayDialogActionWidget(closeHost, "关闭", true, func() {
+		a.closeUnlockSummaryDialog()
+	}); err != nil {
+		dlg.Dispose()
+		a.summaryDialog = nil
+		a.showError("创建解锁简报按钮失败", err)
+		return
+	}
+
+	dlg.Disposing().Attach(func() {
+		if a.summaryDialog == dlg {
+			a.summaryDialog = nil
+		}
+	})
+	dlg.Show()
+	centerDialogOnWorkArea(dlg)
+	activateHandle(dlg.Handle())
+	dlg.SetFocus()
+}
+
+func (a *NativeApp) closeUnlockSummaryDialog() {
+	if a.summaryDialog == nil || a.summaryDialog.IsDisposed() {
+		return
+	}
+	a.summaryDialog.Close(0)
+}
+
+func (a *NativeApp) buildUnlockSummary(todos []Todo) string {
+	if len(todos) == 0 {
+		return "当前没有待办。\r\n\r\n今天可以轻装上阵。"
+	}
+
+	lines := make([]string, 0, len(todos)*7)
+	for i, todo := range todos {
+		lines = append(lines, fmt.Sprintf("%d. %s", i+1, todo.Title))
+		lines = append(lines, "   类型: "+string(todo.Kind))
+		lines = append(lines, "   截止: "+formatTodoDeadline(todo.Deadline))
+		if details := strings.TrimSpace(todo.Details); details != "" {
+			lines = append(lines, "   详情: "+details)
+		}
+		progress := strings.TrimSpace(progressTimeline(todo.Progress))
+		if progress == "" {
+			lines = append(lines, "   进展: 暂无进展记录")
+		} else {
+			parts := strings.Split(progress, "\n")
+			if len(parts) > 3 {
+				parts = parts[len(parts)-3:]
+			}
+			lines = append(lines, "   最近进展:")
+			for _, part := range parts {
+				lines = append(lines, "   - "+strings.TrimSpace(part))
+			}
+		}
+		if tag := firstTag(todo.Tags); tag != "" {
+			lines = append(lines, "   标签: "+tag)
+		}
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\r\n")
+}
+
+func (a *NativeApp) collapseWindow() {
 	a.rememberExpandedBounds()
-
-	work := desktopWorkArea()
-	target := walk.Rectangle{
-		X:      work.X + work.Width - a.collapsedWidth,
-		Y:      clampInt(work.Y+(work.Height-a.collapsedHeight)/2, work.Y+24, work.Y+work.Height-a.collapsedHeight-24),
-		Width:  a.collapsedWidth,
-		Height: a.collapsedHeight,
-	}
-
-	a.windowAnimating = true
-	go func() {
-		const steps = 9
-		for step := 1; step <= steps; step++ {
-			time.Sleep(14 * time.Millisecond)
-			if a.mw == nil || a.mw.IsDisposed() {
-				return
-			}
-
-			progress := float64(step) / float64(steps)
-			eased := 1 - math.Pow(1-progress, 2.2)
-			frame := walk.Rectangle{
-				X:      int(math.Round(float64(start.X) + float64(target.X-start.X)*eased)),
-				Y:      int(math.Round(float64(start.Y) + float64(target.Y-start.Y)*eased)),
-				Width:  int(math.Round(float64(start.Width) + float64(target.Width-start.Width)*eased)),
-				Height: int(math.Round(float64(start.Height) + float64(target.Height-start.Height)*eased)),
-			}
-
-			a.mw.Synchronize(func() {
-				if a.mw == nil || a.mw.IsDisposed() {
-					return
-				}
-				_ = a.mw.SetBoundsPixels(frame)
-			})
-		}
-
-		if a.mw == nil || a.mw.IsDisposed() {
-			return
-		}
-
-		a.mw.Synchronize(func() {
-			a.windowAnimating = false
-			a.setWindowCollapsed(true, false)
-		})
-	}()
-
-	return true
-}
-
-func (a *NativeApp) animateExpandFromDock() bool {
-	if a.mw == nil || a.mw.IsDisposed() || !a.collapsed || a.windowAnimating {
-		return false
-	}
-
-	start := a.mw.BoundsPixels()
-	a.setWindowCollapsed(false, false)
-	target := a.mw.BoundsPixels()
-	if start == target {
-		activateHandle(a.mw.Handle())
-		a.mw.SetFocus()
-		return true
-	}
-
-	a.windowAnimating = true
-	_ = a.mw.SetBoundsPixels(start)
-
-	go func() {
-		const steps = 9
-		for step := 1; step <= steps; step++ {
-			time.Sleep(14 * time.Millisecond)
-			if a.mw == nil || a.mw.IsDisposed() {
-				return
-			}
-
-			progress := float64(step) / float64(steps)
-			eased := 1 - math.Pow(1-progress, 2.2)
-			frame := walk.Rectangle{
-				X:      int(math.Round(float64(start.X) + float64(target.X-start.X)*eased)),
-				Y:      int(math.Round(float64(start.Y) + float64(target.Y-start.Y)*eased)),
-				Width:  int(math.Round(float64(start.Width) + float64(target.Width-start.Width)*eased)),
-				Height: int(math.Round(float64(start.Height) + float64(target.Height-start.Height)*eased)),
-			}
-
-			a.mw.Synchronize(func() {
-				if a.mw == nil || a.mw.IsDisposed() {
-					return
-				}
-				_ = a.mw.SetBoundsPixels(frame)
-			})
-		}
-
-		if a.mw == nil || a.mw.IsDisposed() {
-			return
-		}
-
-		a.mw.Synchronize(func() {
-			a.windowAnimating = false
-			_ = a.mw.SetBoundsPixels(target)
-			activateHandle(a.mw.Handle())
-			a.mw.SetFocus()
-		})
-	}()
-
-	return true
+	a.setWindowCollapsed(true, false)
 }
 
 func (a *NativeApp) setWindowCollapsed(collapsed, focus bool) {
 	if a.mw == nil {
-		return
-	}
-	if a.windowAnimating {
 		return
 	}
 	if a.collapsed == collapsed && a.mw.Visible() {
@@ -2507,8 +2578,8 @@ func (a *NativeApp) setWindowCollapsed(collapsed, focus bool) {
 	if a.headerHost != nil {
 		a.headerHost.SetVisible(!collapsed)
 	}
-	if a.scrollView != nil {
-		a.scrollView.SetVisible(!collapsed)
+	if a.listHost != nil {
+		a.listHost.SetVisible(!collapsed)
 	}
 	if a.footerHost != nil {
 		a.footerHost.SetVisible(!collapsed)
@@ -2544,7 +2615,7 @@ func (a *NativeApp) syncWindowSize() {
 
 	work := desktopWorkArea()
 	a.windowWidth = targetExpandedWindowWidth(work.Width)
-	minExpandedHeight := a.minimumExpandedClientHeight()
+	minExpandedHeight := a.minimumExpandedClientHeight(work.Height)
 	if a.collapsed {
 		_ = a.mw.SetMinMaxSize(
 			walk.Size{Width: a.collapsedWidth, Height: a.collapsedHeight},
@@ -2574,7 +2645,7 @@ func (a *NativeApp) syncWindowSize() {
 
 	contentHeight := a.expandedChromeHeight() + a.listHeight()
 	maxClientHeight := int(float64(work.Height)*a.maxHeightRatio) - a.windowDecorationHeight()
-	maxClientHeight = clampInt(maxClientHeight, minExpandedHeight, a.maxWindowHeight)
+	maxClientHeight = clampInt(maxClientHeight, minExpandedHeight, maxInt(a.maxWindowHeight, minExpandedHeight))
 
 	clientHeight := clampInt(contentHeight, minExpandedHeight, maxClientHeight)
 	if rememberedHeight := a.rememberedExpandedClientHeight(); rememberedHeight > 0 {
@@ -2618,8 +2689,11 @@ func (a *NativeApp) expandedChromeHeight() int {
 	return headerHeight + footerHeight + windowMargins + stackSpacing
 }
 
-func (a *NativeApp) minimumExpandedClientHeight() int {
-	const minimumListViewportHeight = 170
+func (a *NativeApp) minimumExpandedClientHeight(workHeight int) int {
+	minimumListViewportHeight := int(math.Round(float64(workHeight) * 0.60))
+	if minimumListViewportHeight < 170 {
+		minimumListViewportHeight = 170
+	}
 	minHeight := a.expandedChromeHeight() + minimumListViewportHeight
 	if a.minWindowHeight > 0 && a.minWindowHeight > minHeight {
 		return a.minWindowHeight
@@ -2637,8 +2711,8 @@ func (a *NativeApp) listHeight() int {
 
 func (a *NativeApp) boardWidthHint() int {
 	width := a.windowWidth - 28
-	if a.scrollView != nil {
-		if current := a.scrollView.ClientBoundsPixels().Width; current > 18 {
+	if a.listHost != nil {
+		if current := a.listHost.ClientBoundsPixels().Width; current > 18 {
 			width = current
 		}
 	}
@@ -2938,6 +3012,7 @@ func (a *NativeApp) exitApp() {
 	a.quitting = true
 	a.uninstallGlobalMouseHook()
 	a.uninstallMainWndProc()
+	a.unregisterSessionNotifications()
 	a.unregisterTrackedWindow(a.mw.Handle())
 	if a.notificationStop != nil {
 		close(a.notificationStop)
@@ -3132,16 +3207,6 @@ func (a *NativeApp) applyWindowShape(collapsed bool) {
 	procSetWindowRgn.Call(uintptr(a.mw.Handle()), 0, 1)
 }
 
-func removalFadeForProgress(progress float64) float64 {
-	if progress <= 0 {
-		return 0
-	}
-	if progress >= 1 {
-		return 1
-	}
-	return progress
-}
-
 func deadlineSelectorOptions() ([]string, []string) {
 	deadlineHours := make([]string, 24)
 	for hour := range deadlineHours {
@@ -3181,6 +3246,12 @@ func mainWndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
 
 	if app != nil {
 		switch msg {
+		case wmWTSSessionChange:
+			if uint32(wParam) == wtsSessionUnlock && app.mw != nil && !app.mw.IsDisposed() {
+				app.mw.Synchronize(func() {
+					app.handleSessionUnlock()
+				})
+			}
 		case win.WM_LBUTTONDOWN, win.WM_RBUTTONDOWN, win.WM_MBUTTONDOWN, win.WM_NCLBUTTONDOWN:
 			app.beginInternalPointerAction()
 		case win.WM_LBUTTONUP, win.WM_RBUTTONUP, win.WM_MBUTTONUP, win.WM_NCLBUTTONUP, win.WM_CAPTURECHANGED:

@@ -6,8 +6,10 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/lxn/walk"
+	"github.com/lxn/win"
 )
 
 const (
@@ -269,24 +271,23 @@ func (p *CardPainter) layoutTodo(todo Todo, width, y int, actionLabel string) ca
 	}
 }
 
-func (p *CardPainter) drawCard(canvas *walk.Canvas, layout cardLayout, offset int, fade float64, removing bool, showCheck bool, showAction bool) {
-	cardBounds := offsetRect(layout.cardBounds, offset)
-	accentBounds := offsetRect(layout.accentBounds, offset)
-	typeBounds := offsetRect(layout.typeBounds, offset)
-	deadlineBounds := offsetRect(layout.deadlineBounds, offset)
-	countdownBounds := offsetRect(layout.countdownBounds, offset)
-	tagBounds := offsetRect(layout.tagBounds, offset)
-	titleBounds := offsetRect(layout.titleBounds, offset)
-	detailsBounds := offsetRect(layout.detailsBounds, offset)
-	checkBounds := offsetRect(layout.checkBounds, offset)
-	postponeBounds := offsetRect(layout.postponeBounds, offset)
+func (p *CardPainter) drawCard(canvas *walk.Canvas, layout cardLayout, showCheck bool, showAction bool, showCountdown bool) {
+	cardBounds := layout.cardBounds
+	accentBounds := layout.accentBounds
+	typeBounds := layout.typeBounds
+	deadlineBounds := layout.deadlineBounds
+	countdownBounds := layout.countdownBounds
+	tagBounds := layout.tagBounds
+	titleBounds := layout.titleBounds
+	detailsBounds := layout.detailsBounds
+	checkBounds := layout.checkBounds
+	postponeBounds := layout.postponeBounds
 
 	accentColor, typeFg := todoTypeColors(layout.todo.Kind)
 	cardFill := rgb(254, 255, 255)
 	cardBorder := rgb(221, 227, 235)
 	checkFill := rgb(250, 252, 255)
 	checkBorder := rgb(148, 159, 171)
-	checkMarkColor := rgb(255, 255, 255)
 	deadlineFill := rgb(244, 247, 251)
 	deadlineTextColor := rgb(98, 107, 116)
 	tagFill := rgb(236, 242, 249)
@@ -298,18 +299,15 @@ func (p *CardPainter) drawCard(canvas *walk.Canvas, layout cardLayout, offset in
 	detailsColor := rgb(92, 101, 111)
 	urgencyTint := urgencyTintRatio(layout.todo.CreatedAt, layout.todo.Deadline, p.urgencyTintPercent)
 	countdownFill, countdownTextColor := countdownPillColors(urgencyTint)
-	if removing {
-		checkMarkColor = accentColor
-	}
-	_ = fade
-
 	scale := cardScaleFactor(layout.cardBounds.Width)
 	p.fillRoundedRect(canvas, cardFill, cardBorder, cardBounds, scaleMetric(cardRadius, scale))
 	p.fillRoundedRect(canvas, accentColor, accentColor, accentBounds, scaleMetric(3, scale))
 
 	p.drawPill(canvas, typeBounds, accentColor, typeFg, string(layout.todo.Kind))
 	p.drawPill(canvas, deadlineBounds, deadlineFill, deadlineTextColor, "\u622a\u6b62 "+formatTodoDeadline(layout.todo.Deadline))
-	p.drawPill(canvas, countdownBounds, countdownFill, countdownTextColor, deadlineCountdownLabel(layout.todo.Deadline))
+	if showCountdown {
+		p.drawPill(canvas, countdownBounds, countdownFill, countdownTextColor, deadlineCountdownLabel(layout.todo.Deadline))
+	}
 	if tag := firstTag(layout.todo.Tags); tag != "" {
 		p.drawPill(canvas, tagBounds, tagFill, tagTextColor, tag)
 	}
@@ -341,9 +339,6 @@ func (p *CardPainter) drawCard(canvas *walk.Canvas, layout cardLayout, offset in
 
 	if showCheck {
 		p.fillEllipse(canvas, checkFill, checkBorder, checkBounds)
-		if removing {
-			p.drawCheckMark(canvas, checkBounds, checkMarkColor)
-		}
 	}
 }
 
@@ -424,17 +419,20 @@ type TodoBoardWidget struct {
 	totalHeight   int
 	widthHint     int
 	layoutDirty   bool
-	removing      map[string]bool
-	removalOffset map[string]int
-	removalFade   map[string]float64
 	actionLabel   string
 	showCheck     bool
 	showAction    bool
+	showCountdown bool
 	skinBitmap    *walk.Bitmap
 	skinOpacity   byte
+	cacheBitmap   *walk.Bitmap
+	cacheWidth    int
+	cacheHeight   int
+	cacheDirty    bool
+	scrollY       int
 }
 
-func NewTodoBoardWidget(parent walk.Container, painter *CardPainter, onComplete func(string), onPostpone func(string), onOpenDetails func(string), actionLabel string, showCheck bool, showAction bool) (*TodoBoardWidget, error) {
+func NewTodoBoardWidget(parent walk.Container, painter *CardPainter, onComplete func(string), onPostpone func(string), onOpenDetails func(string), actionLabel string, showCheck bool, showAction bool, showCountdown bool) (*TodoBoardWidget, error) {
 	board := &TodoBoardWidget{
 		painter:       painter,
 		onComplete:    onComplete,
@@ -442,15 +440,14 @@ func NewTodoBoardWidget(parent walk.Container, painter *CardPainter, onComplete 
 		onOpenDetails: onOpenDetails,
 		widthHint:     620,
 		layoutDirty:   true,
-		removing:      map[string]bool{},
-		removalOffset: map[string]int{},
-		removalFade:   map[string]float64{},
 		actionLabel:   actionLabel,
 		showCheck:     showCheck,
 		showAction:    showAction,
+		showCountdown: showCountdown,
+		cacheDirty:    true,
 	}
 
-	cw, err := walk.NewCustomWidgetPixels(parent, 0, func(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
+	cw, err := walk.NewCustomWidgetPixels(parent, uint(win.WS_VSCROLL), func(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
 		return board.paint(canvas, updateBounds)
 	})
 	if err != nil {
@@ -469,6 +466,7 @@ func NewTodoBoardWidget(parent walk.Container, painter *CardPainter, onComplete 
 	board.SetWidthHint(board.widthHint)
 
 	board.MouseUp().Attach(func(x, y int, button walk.MouseButton) {
+		y += board.scrollY
 		switch button {
 		case walk.LeftButton:
 			if id, ok := board.hitPostpone(x, y); ok && board.onPostpone != nil {
@@ -508,118 +506,55 @@ func (b *TodoBoardWidget) SetWidthHint(width int) {
 
 func (b *TodoBoardWidget) SetTodos(todos []Todo) {
 	b.todos = append([]Todo(nil), todos...)
-	b.removing = map[string]bool{}
-	b.removalOffset = map[string]int{}
-	b.removalFade = map[string]float64{}
 	b.invalidateLayout()
 }
 
 func (b *TodoBoardWidget) PreferredHeight(width int) int {
-	if width <= 0 {
-		width = b.widthHint
-	}
-	_, totalHeight := b.ensureLayout(width)
-	return totalHeight
+	return emptyStateHeight
 }
 
-func (b *TodoBoardWidget) BeginRemoval(id string) bool {
-	for _, todo := range b.todos {
-		if todo.ID != id {
-			continue
-		}
-		if b.removing[id] {
-			return false
-		}
-		b.removing[id] = true
-		b.removalOffset[id] = 0
-		b.removalFade[id] = 0
-		_ = b.Invalidate()
-		return true
+func (b *TodoBoardWidget) paint(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
+	if updateBounds.Width <= 0 || updateBounds.Height <= 0 {
+		updateBounds = b.ClientBoundsPixels()
 	}
-
-	return false
-}
-
-func (b *TodoBoardWidget) RemovalTargetOffset(id string) int {
-	layouts, _ := b.ensureLayout(b.ClientBoundsPixels().Width)
-	for _, layout := range layouts {
-		if layout.todo.ID == id {
-			target := int(float64(layout.cardBounds.Width) * removalHideRatio)
-			return clampInt(target, 180, 960)
-		}
-	}
-
-	return clampInt(int(float64(b.widthHint)*removalHideRatio), 180, 960)
-}
-
-func (b *TodoBoardWidget) SetRemovalOffset(id string, offset int) {
-	if !b.removing[id] {
-		return
-	}
-
-	b.removalOffset[id] = offset
-	_ = b.Invalidate()
-}
-
-func (b *TodoBoardWidget) CancelRemoval(id string) {
-	delete(b.removing, id)
-	delete(b.removalOffset, id)
-	delete(b.removalFade, id)
-	_ = b.Invalidate()
-}
-
-func (b *TodoBoardWidget) SetRemovalFade(id string, fade float64) {
-	if !b.removing[id] {
-		return
-	}
-
-	if fade < 0 {
-		fade = 0
-	}
-	if fade > 1 {
-		fade = 1
-	}
-	b.removalFade[id] = fade
-	_ = b.Invalidate()
-}
-
-func (b *TodoBoardWidget) paint(canvas *walk.Canvas, _ walk.Rectangle) error {
-	background, err := walk.NewSolidColorBrush(boardBackgroundColor())
-	if err == nil {
-		defer background.Dispose()
-		_ = canvas.FillRectanglePixels(background, b.ClientBoundsPixels())
-	}
-	if b.skinBitmap != nil && b.skinOpacity > 0 {
-		size := b.skinBitmap.Size()
-		bounds := b.ClientBoundsPixels()
-		if size.Width > 0 && size.Height > 0 && bounds.Width > 0 && bounds.Height > 0 {
-			scale := float64(bounds.Height) / float64(size.Height)
-			drawWidth := int(math.Round(float64(size.Width) * scale))
-			drawBounds := walk.Rectangle{
-				X:      (bounds.Width - drawWidth) / 2,
-				Y:      0,
-				Width:  drawWidth,
-				Height: bounds.Height,
-			}
-			_ = canvas.DrawBitmapWithOpacityPixels(b.skinBitmap, drawBounds, b.skinOpacity)
-		}
-	}
-
 	width := b.ClientBoundsPixels().Width
 	if width <= 0 {
 		width = b.widthHint
 	}
-	layouts, _ := b.ensureLayout(width)
-	if len(layouts) == 0 {
-		return b.drawEmptyState(canvas)
+	layouts, totalHeight := b.ensureLayout(width)
+	b.updateScrollBar(totalHeight)
+	if err := b.ensureCache(width, totalHeight, layouts); err != nil {
+		return err
 	}
 
-	for _, layout := range layouts {
-		offset := b.removalOffset[layout.todo.ID]
-		fade := b.removalFade[layout.todo.ID]
-		b.painter.drawCard(canvas, layout, offset, fade, b.removing[layout.todo.ID], b.showCheck, b.showAction)
+	if b.cacheBitmap == nil {
+		return nil
 	}
 
+	src := walk.Rectangle{
+		X:      updateBounds.X,
+		Y:      updateBounds.Y + b.scrollY,
+		Width:  updateBounds.Width,
+		Height: updateBounds.Height,
+	}
+	if src.Y+src.Height > b.cacheHeight {
+		src.Height = maxInt(0, b.cacheHeight-src.Y)
+	}
+	if src.Height > 0 {
+		if err := canvas.DrawBitmapPartWithOpacityPixels(b.cacheBitmap, updateBounds, src, 0xff); err != nil {
+			return err
+		}
+	}
+	if src.Height < updateBounds.Height {
+		fillRect := walk.Rectangle{X: updateBounds.X, Y: updateBounds.Y + src.Height, Width: updateBounds.Width, Height: updateBounds.Height - src.Height}
+		if fillRect.Height > 0 {
+			background, err := walk.NewSolidColorBrush(boardBackgroundColor())
+			if err == nil {
+				defer background.Dispose()
+				_ = canvas.FillRectanglePixels(background, fillRect)
+			}
+		}
+	}
 	return nil
 }
 
@@ -632,10 +567,11 @@ func (b *TodoBoardWidget) SetSkin(bitmap *walk.Bitmap, opacityPercent int) {
 		opacityPercent = 100
 	}
 	b.skinOpacity = byte(math.Round(float64(opacityPercent) * 255 / 100))
+	b.cacheDirty = true
 	_ = b.Invalidate()
 }
 
-func (b *TodoBoardWidget) drawEmptyState(canvas *walk.Canvas) error {
+func (b *TodoBoardWidget) drawEmptyState(canvas *walk.Canvas, updateBounds walk.Rectangle) error {
 	emptyRect := b.ClientBoundsPixels()
 	emptyRect.X += 12
 	emptyRect.Y += 18
@@ -643,6 +579,9 @@ func (b *TodoBoardWidget) drawEmptyState(canvas *walk.Canvas) error {
 	emptyRect.Height -= 36
 	if emptyRect.Height < 72 {
 		emptyRect.Height = 72
+	}
+	if clipped, ok := intersectRect(emptyRect, updateBounds); ok {
+		emptyRect = clipped
 	}
 
 	_ = canvas.DrawTextPixels(
@@ -662,8 +601,7 @@ func (b *TodoBoardWidget) hitCheck(x, y int) (string, bool) {
 	}
 	layouts, _ := b.ensureLayout(b.ClientBoundsPixels().Width)
 	for _, layout := range layouts {
-		checkRect := offsetRect(layout.checkBounds, b.removalOffset[layout.todo.ID])
-		if pointInRect(x, y, checkRect) {
+		if pointInRect(x, y, layout.checkBounds) {
 			return layout.todo.ID, true
 		}
 	}
@@ -677,8 +615,7 @@ func (b *TodoBoardWidget) hitPostpone(x, y int) (string, bool) {
 	}
 	layouts, _ := b.ensureLayout(b.ClientBoundsPixels().Width)
 	for _, layout := range layouts {
-		postponeRect := offsetRect(layout.postponeBounds, b.removalOffset[layout.todo.ID])
-		if pointInRect(x, y, postponeRect) {
+		if pointInRect(x, y, layout.postponeBounds) {
 			return layout.todo.ID, true
 		}
 	}
@@ -689,8 +626,7 @@ func (b *TodoBoardWidget) hitPostpone(x, y int) (string, bool) {
 func (b *TodoBoardWidget) hitTodo(x, y int) (string, bool) {
 	layouts, _ := b.ensureLayout(b.ClientBoundsPixels().Width)
 	for _, layout := range layouts {
-		cardRect := offsetRect(layout.cardBounds, b.removalOffset[layout.todo.ID])
-		if pointInRect(x, y, cardRect) {
+		if pointInRect(x, y, layout.cardBounds) {
 			return layout.todo.ID, true
 		}
 	}
@@ -734,8 +670,78 @@ func (b *TodoBoardWidget) invalidateLayout() {
 	b.layoutWidth = 0
 	b.layouts = nil
 	b.totalHeight = 0
+	b.cacheDirty = true
 	b.RequestLayout()
+	b.updateScrollBar(emptyStateHeight)
 	_ = b.Invalidate()
+}
+
+func (b *TodoBoardWidget) ensureCache(width, totalHeight int, layouts []cardLayout) error {
+	if width <= 0 {
+		width = b.widthHint
+	}
+	if totalHeight <= 0 {
+		totalHeight = emptyStateHeight
+	}
+	if !b.cacheDirty && b.cacheBitmap != nil && b.cacheWidth == width && b.cacheHeight == totalHeight {
+		return nil
+	}
+
+	if b.cacheBitmap != nil {
+		b.cacheBitmap.Dispose()
+		b.cacheBitmap = nil
+	}
+
+	bmp, err := walk.NewBitmapForDPI(walk.Size{Width: width, Height: totalHeight}, b.DPI())
+	if err != nil {
+		return err
+	}
+
+	cacheCanvas, err := walk.NewCanvasFromImage(bmp)
+	if err != nil {
+		bmp.Dispose()
+		return err
+	}
+	defer cacheCanvas.Dispose()
+
+	fullBounds := walk.Rectangle{Width: width, Height: totalHeight}
+	background, err := walk.NewSolidColorBrush(boardBackgroundColor())
+	if err == nil {
+		defer background.Dispose()
+		_ = cacheCanvas.FillRectanglePixels(background, fullBounds)
+	}
+
+	if b.skinBitmap != nil && b.skinOpacity > 0 {
+		size := b.skinBitmap.Size()
+		if size.Width > 0 && size.Height > 0 {
+			scale := float64(totalHeight) / float64(size.Height)
+			drawWidth := int(math.Round(float64(size.Width) * scale))
+			drawBounds := walk.Rectangle{
+				X:      (width - drawWidth) / 2,
+				Y:      0,
+				Width:  drawWidth,
+				Height: totalHeight,
+			}
+			_ = cacheCanvas.DrawBitmapWithOpacityPixels(b.skinBitmap, drawBounds, b.skinOpacity)
+		}
+	}
+
+	if len(layouts) == 0 {
+		if err := b.drawEmptyState(cacheCanvas, fullBounds); err != nil {
+			bmp.Dispose()
+			return err
+		}
+	} else {
+		for _, layout := range layouts {
+			b.painter.drawCard(cacheCanvas, layout, b.showCheck, b.showAction, b.showCountdown)
+		}
+	}
+
+	b.cacheBitmap = bmp
+	b.cacheWidth = width
+	b.cacheHeight = totalHeight
+	b.cacheDirty = false
+	return nil
 }
 
 type todoBoardLayoutItem struct {
@@ -744,7 +750,7 @@ type todoBoardLayoutItem struct {
 }
 
 func (*todoBoardLayoutItem) LayoutFlags() walk.LayoutFlags {
-	return walk.GrowableHorz | walk.GreedyHorz | walk.ShrinkableVert
+	return walk.GrowableHorz | walk.GreedyHorz | walk.GrowableVert | walk.GreedyVert
 }
 
 func (li *todoBoardLayoutItem) IdealSize() walk.Size {
@@ -753,7 +759,7 @@ func (li *todoBoardLayoutItem) IdealSize() walk.Size {
 		width = 620
 	}
 
-	return walk.Size{Width: width, Height: li.board.PreferredHeight(width)}
+	return walk.Size{Width: width, Height: 360}
 }
 
 func (li *todoBoardLayoutItem) MinSize() walk.Size {
@@ -761,7 +767,7 @@ func (li *todoBoardLayoutItem) MinSize() walk.Size {
 	if width < minBoardWidth {
 		width = minBoardWidth
 	}
-	return walk.Size{Width: width, Height: li.board.PreferredHeight(width)}
+	return walk.Size{Width: width, Height: emptyStateHeight}
 }
 
 func (*todoBoardLayoutItem) HasHeightForWidth() bool {
@@ -769,12 +775,119 @@ func (*todoBoardLayoutItem) HasHeightForWidth() bool {
 }
 
 func (li *todoBoardLayoutItem) HeightForWidth(width int) int {
-	return li.board.PreferredHeight(width)
+	return emptyStateHeight
 }
 
-func offsetRect(rect walk.Rectangle, offset int) walk.Rectangle {
-	rect.X += offset
-	return rect
+func (b *TodoBoardWidget) WndProc(hwnd win.HWND, msg uint32, wParam, lParam uintptr) uintptr {
+	switch msg {
+	case win.WM_MOUSEWHEEL:
+		delta := int16(win.HIWORD(uint32(wParam)))
+		lines := 3
+		step := 36 * lines
+		if delta < 0 {
+			b.setScrollY(b.scrollY + step)
+		} else {
+			b.setScrollY(b.scrollY - step)
+		}
+		return 0
+
+	case win.WM_VSCROLL:
+		cmd := win.LOWORD(uint32(wParam))
+		switch cmd {
+		case win.SB_LINEUP:
+			b.setScrollY(b.scrollY - 36)
+		case win.SB_LINEDOWN:
+			b.setScrollY(b.scrollY + 36)
+		case win.SB_PAGEUP:
+			b.setScrollY(b.scrollY - b.ClientBoundsPixels().Height)
+		case win.SB_PAGEDOWN:
+			b.setScrollY(b.scrollY + b.ClientBoundsPixels().Height)
+		case win.SB_THUMBPOSITION, win.SB_THUMBTRACK:
+			var si win.SCROLLINFO
+			si.CbSize = uint32(unsafe.Sizeof(si))
+			si.FMask = win.SIF_TRACKPOS
+			if win.GetScrollInfo(hwnd, win.SB_VERT, &si) {
+				b.setScrollY(int(si.NTrackPos))
+			}
+		}
+		return 0
+
+	case win.WM_WINDOWPOSCHANGED:
+		result := b.CustomWidget.WndProc(hwnd, msg, wParam, lParam)
+		width := b.ClientBoundsPixels().Width
+		if width <= 0 {
+			width = b.widthHint
+		}
+		_, totalHeight := b.ensureLayout(width)
+		b.updateScrollBar(totalHeight)
+		return result
+	}
+
+	return b.CustomWidget.WndProc(hwnd, msg, wParam, lParam)
+}
+
+func (b *TodoBoardWidget) setScrollY(value int) {
+	maxScroll := b.maxScrollY()
+	value = clampInt(value, 0, maxScroll)
+	if value == b.scrollY {
+		return
+	}
+	b.scrollY = value
+	b.updateScrollBar(b.totalHeight)
+	_ = b.Invalidate()
+}
+
+func (b *TodoBoardWidget) maxScrollY() int {
+	clientHeight := b.ClientBoundsPixels().Height
+	if clientHeight <= 0 {
+		clientHeight = emptyStateHeight
+	}
+	return maxInt(0, b.totalHeight-clientHeight)
+}
+
+func (b *TodoBoardWidget) updateScrollBar(totalHeight int) {
+	if b.Handle() == 0 {
+		return
+	}
+	clientHeight := b.ClientBoundsPixels().Height
+	if clientHeight <= 0 {
+		clientHeight = emptyStateHeight
+	}
+	maxScroll := maxInt(0, totalHeight-clientHeight)
+	if b.scrollY > maxScroll {
+		b.scrollY = maxScroll
+	}
+	var si win.SCROLLINFO
+	si.CbSize = uint32(unsafe.Sizeof(si))
+	si.FMask = win.SIF_RANGE | win.SIF_PAGE | win.SIF_POS
+	si.NMin = 0
+	si.NMax = int32(maxInt(totalHeight-1, 0))
+	si.NPage = uint32(clientHeight)
+	si.NPos = int32(b.scrollY)
+	win.SetScrollInfo(b.Handle(), win.SB_VERT, &si, true)
+}
+
+func intersectRect(a, b walk.Rectangle) (walk.Rectangle, bool) {
+	left := maxInt(a.X, b.X)
+	top := maxInt(a.Y, b.Y)
+	right := minInt(a.X+a.Width, b.X+b.Width)
+	bottom := minInt(a.Y+a.Height, b.Y+b.Height)
+	if right <= left || bottom <= top {
+		return walk.Rectangle{}, false
+	}
+	return walk.Rectangle{
+		X:      left,
+		Y:      top,
+		Width:  right - left,
+		Height: bottom - top,
+	}, true
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func todoTypeColors(kind TodoType) (walk.Color, walk.Color) {
